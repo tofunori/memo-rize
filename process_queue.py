@@ -2,7 +2,7 @@
 """
 process_queue.py — Worker asynchrone auto_remember
 Traite les tickets déposés par enqueue.py.
-Déclenché par launchd WatchPaths sur le dossier queue/.
+Déclenché par launchd WatchPaths sur ~/.claude/hooks/queue/.
 Utilise Fireworks (kimi-k2) — latence sans importance, qualité maximale.
 """
 
@@ -15,37 +15,19 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-try:
-    from config import (
-        VAULT_NOTES_DIR as _VAULT_NOTES_DIR,
-        QDRANT_PATH as _QDRANT_PATH,
-        ENV_FILE as _ENV_FILE,
-        LOG_FILE as _LOG_FILE,
-        QUEUE_DIR as _QUEUE_DIR,
-        COHERE_EMBED_MODEL,
-        FIREWORKS_MODEL,
-        FIREWORKS_BASE_URL,
-        DEDUP_THRESHOLD,
-    )
-    VAULT_NOTES_DIR = Path(_VAULT_NOTES_DIR)
-    QDRANT_PATH = Path(_QDRANT_PATH)
-    ENV_FILE = Path(_ENV_FILE)
-    LOG_FILE = Path(_LOG_FILE)
-    QUEUE_DIR = Path(_QUEUE_DIR)
-except ImportError:
-    VAULT_NOTES_DIR = Path.home() / "notes"
-    QDRANT_PATH = Path.home() / ".claude/hooks/vault_qdrant"
-    ENV_FILE = Path.home() / ".claude/hooks/.env"
-    LOG_FILE = Path.home() / ".claude/hooks/auto_remember.log"
-    QUEUE_DIR = Path.home() / ".claude/hooks/queue"
-    COHERE_EMBED_MODEL = "embed-multilingual-v3.0"
-    FIREWORKS_MODEL = "accounts/fireworks/models/kimi-k2p5"
-    FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
-    DEDUP_THRESHOLD = 0.85
-
+VAULT_NOTES_DIR = Path("/Users/tofunori/Documents/UTQR/Master/knowledge/notes")
+LOG_FILE = Path("/Users/tofunori/.claude/hooks/auto_remember.log")
+ENV_FILE = Path("/Users/tofunori/.claude/hooks/.env")
+QUEUE_DIR = Path("/Users/tofunori/.claude/hooks/queue")
 PROCESSED_DIR = QUEUE_DIR / "processed"
-HOOKS_DIR = ENV_FILE.parent
+HOOKS_DIR = Path("/Users/tofunori/.claude/hooks")
+QDRANT_PATH = HOOKS_DIR / "vault_qdrant"
 COLLECTION = "vault_notes"
+DEDUP_THRESHOLD = 0.85  # Score cosine minimum pour considérer un doublon
+
+FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
+FIREWORKS_MODEL = "accounts/fireworks/models/kimi-k2p5"
+
 TODAY = date.today().isoformat()
 
 
@@ -104,19 +86,19 @@ def check_semantic_dup(content: str) -> tuple[bool, str]:
         if co is None:
             return False, ""
         resp = co.embed(
-            model=COHERE_EMBED_MODEL,
+            model="embed-multilingual-v3.0",
             texts=[content[:500]],
             input_type="search_query",
             embedding_types=["float"],
         )
-        qd_resp = qd.query_points(
+        response = qd.query_points(
             collection_name=COLLECTION,
             query=resp.embeddings.float_[0],
             limit=1,
             score_threshold=DEDUP_THRESHOLD,
         )
-        if qd_resp.points:
-            return True, qd_resp.points[0].payload.get("note_id", "")
+        if response.points:
+            return True, response.points[0].payload.get("note_id", "")
     except Exception as e:
         log(f"DEDUP error: {e}")
     return False, ""
@@ -205,16 +187,16 @@ def extract_facts_with_llm(conversation: str, existing_notes: str) -> list:
 
     client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
 
-    prompt = f"""Tu es un agent de mémoire personnelle.
+    prompt = f"""Tu es un agent de mémoire personnelle pour Thierry, un étudiant à la maîtrise.
 
-Extrais 0-5 faits atomiques DURABLES depuis cette session Claude Code.
+Extrais 0-15 faits atomiques DURABLES depuis cette session Claude Code.
 
 RÈGLES STRICTES :
 - Capture TOUT ce qui est durable : décisions techniques, configs système, solutions à des problèmes, préférences découvertes, workflows établis, insights sur n'importe quel projet, faits appris, outils configurés
-- Le domaine importe peu : recherche, infra, cours, scripts, lecture, etc.
+- Le domaine importe peu : thèse, NAS, scripts, cours, infrastructure, lecture, etc.
 - Ignore : débogage temporaire sans résolution, bavardage, reformulations sans contenu nouveau, étapes intermédiaires
 - Titre = proposition testable ("X fait Y" — pas un label générique)
-- Maximum 5 notes. Zéro si vraiment rien de durable.
+- Maximum 15 notes. Zéro si vraiment rien de durable.
 
 TYPES DE RELATION :
 - NEW : fait entièrement nouveau, absent des notes existantes
@@ -247,7 +229,7 @@ CONVERSATION DE LA SESSION :
     try:
         response = client.chat.completions.create(
             model=FIREWORKS_MODEL,
-            max_tokens=3000,
+            max_tokens=6000,
             messages=[{"role": "user", "content": prompt}]
         )
 
@@ -307,10 +289,12 @@ def process_ticket(ticket_path: Path):
 
     log(f"--- PROCESSING session={session_id[:8]}")
 
+    # Vault doit exister
     if not VAULT_NOTES_DIR.exists():
         log(f"Vault introuvable: {VAULT_NOTES_DIR}, skip")
         return
 
+    # Transcript doit exister
     if not transcript_path or not Path(transcript_path).exists():
         log(f"Transcript introuvable: {transcript_path}, skip")
         _archive(ticket_path, session_id)
@@ -375,6 +359,7 @@ def _archive(ticket_path: Path, session_id: str):
 
 def main():
     try:
+        # Scanner tous les tickets en attente
         tickets = [
             f for f in QUEUE_DIR.glob("*.json")
             if f.is_file() and f.parent == QUEUE_DIR
@@ -388,6 +373,7 @@ def main():
 
         for ticket_path in sorted(tickets, key=lambda f: f.stat().st_mtime):
             session_id = ticket_path.stem
+            # Déduplication : déjà archivé ?
             if (PROCESSED_DIR / ticket_path.name).exists():
                 log(f"SKIP (already processed) session={session_id[:8]}")
                 ticket_path.unlink(missing_ok=True)
