@@ -21,6 +21,7 @@ try:
         RETRIEVE_SCORE_THRESHOLD as SCORE_THRESHOLD,
         RETRIEVE_TOP_K as TOP_K,
         MIN_QUERY_LENGTH,
+        VOYAGE_EMBED_MODEL,
     )
     VAULT_NOTES_DIR = Path(VAULT_NOTES_DIR)
     QDRANT_PATH = Path(QDRANT_PATH)
@@ -119,21 +120,21 @@ def main():
     if not QDRANT_PATH.exists():
         sys.exit(0)
 
-    # Guard: COHERE_API_KEY missing
+    # Guard: VOYAGE_API_KEY missing
     env = load_env_file()
-    api_key = env.get("COHERE_API_KEY") or os.environ.get("COHERE_API_KEY", "")
+    api_key = env.get("VOYAGE_API_KEY") or os.environ.get("VOYAGE_API_KEY", "")
     if not api_key or api_key.startswith("<"):
         sys.exit(0)
 
     # Runtime imports (fail silently if packages missing)
     try:
-        import cohere
+        import voyageai
         from qdrant_client import QdrantClient
     except ImportError:
         sys.exit(0)
 
     try:
-        co = cohere.ClientV2(api_key)
+        vo = voyageai.Client(api_key=api_key)
         qd = QdrantClient(path=str(QDRANT_PATH))
 
         # Check collection exists
@@ -141,14 +142,14 @@ def main():
         if COLLECTION not in existing:
             sys.exit(0)
 
-        # Embed query (input_type="search_query" — optimized for retrieval)
-        resp = co.embed(
-            model="embed-multilingual-v3.0",
-            texts=[query[:512]],
-            input_type="search_query",
-            embedding_types=["float"],
+        # Embed query (input_type="query" — optimized for retrieval)
+        result = vo.embed(
+            [query[:4000]],
+            model=VOYAGE_EMBED_MODEL,
+            input_type="query",
+            truncation=True,
         )
-        query_emb = resp.embeddings.float_[0]
+        query_emb = result.embeddings[0]
 
         # HNSW search in Qdrant
         response = qd.query_points(

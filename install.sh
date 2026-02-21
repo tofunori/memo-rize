@@ -9,10 +9,10 @@ echo ""
 
 # 1. Python dependencies
 echo "[1/4] Installing Python packages..."
-pip3 install cohere qdrant-client openai --break-system-packages 2>/dev/null || \
-pip3 install cohere qdrant-client openai
+pip3 install voyageai qdrant-client openai --break-system-packages 2>/dev/null || \
+pip3 install voyageai qdrant-client openai
 
-echo "  ✓ cohere, qdrant-client, openai installed"
+echo "  ✓ voyageai, qdrant-client, openai installed"
 echo ""
 
 # 2. Config
@@ -32,13 +32,13 @@ echo "[3/4] API keys configuration"
 ENV_FILE=$(python3 -c "from config import ENV_FILE; print(ENV_FILE)" 2>/dev/null || echo "$HOME/.claude/hooks/.env")
 mkdir -p "$(dirname "$ENV_FILE")"
 
-echo "  [a] Cohere (embeddings) — https://dashboard.cohere.com/api-keys"
-read -p "      COHERE_API_KEY (leave blank to configure manually in .env): " cohere_key
-if [ -n "$cohere_key" ]; then
-    if grep -q "COHERE_API_KEY" "$ENV_FILE" 2>/dev/null; then
-        sed -i.bak "s|COHERE_API_KEY=.*|COHERE_API_KEY=$cohere_key|" "$ENV_FILE"
+echo "  [a] Voyage AI (embeddings, voyage-4-large) — https://dash.voyageai.com"
+read -p "      VOYAGE_API_KEY (leave blank to configure manually in .env): " voyage_key
+if [ -n "$voyage_key" ]; then
+    if grep -q "VOYAGE_API_KEY" "$ENV_FILE" 2>/dev/null; then
+        sed -i.bak "s|VOYAGE_API_KEY=.*|VOYAGE_API_KEY=$voyage_key|" "$ENV_FILE"
     else
-        echo "COHERE_API_KEY=$cohere_key" >> "$ENV_FILE"
+        echo "VOYAGE_API_KEY=$voyage_key" >> "$ENV_FILE"
     fi
     echo "      ✓ Key saved to $ENV_FILE"
 fi

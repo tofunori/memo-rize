@@ -23,9 +23,9 @@ try:
         QDRANT_PATH as _QDRANT_PATH,
         ENV_FILE as _ENV_FILE,
         LOG_FILE as _LOG_FILE,
-        COHERE_EMBED_MODEL,
+        VOYAGE_EMBED_MODEL,
         EMBED_DIM,
-        COHERE_BATCH_SIZE,
+        EMBED_BATCH_SIZE,
     )
     VAULT_NOTES_DIR = Path(_VAULT_NOTES_DIR)
     QDRANT_PATH = Path(_QDRANT_PATH)
@@ -36,9 +36,9 @@ except ImportError:
     QDRANT_PATH = Path.home() / ".claude/hooks/vault_qdrant"
     ENV_FILE = Path.home() / ".claude/hooks/.env"
     LOG_FILE = Path.home() / ".claude/hooks/auto_remember.log"
-    COHERE_EMBED_MODEL = "embed-multilingual-v3.0"
+    VOYAGE_EMBED_MODEL = "voyage-4-large"
     EMBED_DIM = 1024
-    COHERE_BATCH_SIZE = 96
+    EMBED_BATCH_SIZE = 128
 
 COLLECTION = "vault_notes"
 TODAY = date.today().isoformat()
@@ -66,22 +66,22 @@ def load_env_file() -> dict:
 
 
 def get_clients():
-    """Initialize Cohere and Qdrant. Creates collection if missing."""
+    """Initialize Voyage AI and Qdrant. Creates collection if missing."""
     try:
-        import cohere
+        import voyageai
         from qdrant_client import QdrantClient
         from qdrant_client.models import Distance, VectorParams
     except ImportError as e:
-        log(f"EMBED import error: {e} — install: pip install cohere qdrant-client")
+        log(f"EMBED import error: {e} — install: pip install voyageai qdrant-client")
         sys.exit(1)
 
     env = load_env_file()
-    api_key = env.get("COHERE_API_KEY") or os.environ.get("COHERE_API_KEY", "")
+    api_key = env.get("VOYAGE_API_KEY") or os.environ.get("VOYAGE_API_KEY", "")
     if not api_key or api_key.startswith("<"):
-        log("EMBED SKIP: COHERE_API_KEY missing or placeholder in .env")
+        log("EMBED SKIP: VOYAGE_API_KEY missing or placeholder in .env")
         sys.exit(0)
 
-    co = cohere.ClientV2(api_key)
+    vo = voyageai.Client(api_key=api_key)
     QDRANT_PATH.mkdir(parents=True, exist_ok=True)
     qd = QdrantClient(path=str(QDRANT_PATH))
 
@@ -91,9 +91,9 @@ def get_clients():
             COLLECTION,
             vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE)
         )
-        log(f"EMBED collection created: {COLLECTION}")
+        log(f"EMBED collection created: {COLLECTION} (dim={EMBED_DIM})")
 
-    return co, qd
+    return vo, qd
 
 
 def parse_note(path: Path) -> dict | None:
@@ -113,7 +113,7 @@ def parse_note(path: Path) -> dict | None:
     created = created_m.group(1).strip() if created_m else TODAY
 
     body = re.sub(r'^---.*?---\s*', '', text, flags=re.DOTALL).strip()
-    embed_text = f"{description}\n\n{body}"[:2000]
+    embed_text = f"{description}\n\n{body}"[:4000]  # voyage-4-large handles long context
 
     return {
         "note_id": path.stem,
@@ -152,7 +152,7 @@ def upsert_notes(note_ids: list[str] | None = None):
         log("EMBED import PointStruct failed")
         sys.exit(1)
 
-    co, qd = get_clients()
+    vo, qd = get_clients()
     notes = get_notes_to_embed(note_ids)
 
     if not notes:
@@ -160,20 +160,20 @@ def upsert_notes(note_ids: list[str] | None = None):
         return
 
     total = 0
-    for i in range(0, len(notes), COHERE_BATCH_SIZE):
-        batch = notes[i:i + COHERE_BATCH_SIZE]
+    for i in range(0, len(notes), EMBED_BATCH_SIZE):
+        batch = notes[i:i + EMBED_BATCH_SIZE]
         texts = [n["text"] for n in batch]
 
         try:
-            response = co.embed(
-                model=COHERE_EMBED_MODEL,
-                texts=texts,
-                input_type="search_document",
-                embedding_types=["float"],
+            result = vo.embed(
+                texts,
+                model=VOYAGE_EMBED_MODEL,
+                input_type="document",
+                truncation=True,
             )
-            embeddings = response.embeddings.float_
+            embeddings = result.embeddings
         except Exception as e:
-            log(f"EMBED Cohere API error (batch {i}): {e}")
+            log(f"EMBED Voyage AI API error (batch {i}): {e}")
             continue
 
         points = [

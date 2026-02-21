@@ -9,7 +9,7 @@ Persistent semantic memory for [Claude Code](https://claude.ai/claude-code). Eve
 ```
 On every message
   UserPromptSubmit → vault_retrieve.py
-    embed(message) via Cohere API
+    embed(message) via Voyage AI API
     HNSW search in local Qdrant → top notes (score > 0.60)
     inject matched notes into Claude context
 
@@ -37,7 +37,7 @@ Background worker  (launchd WatchPaths)
 
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
-| Embeddings | Cohere `embed-multilingual-v3.0` | Multilingual, 1024 dims, free tier |
+| Embeddings | Voyage AI `voyage-4-large` | #1 on MTEB multilingual retrieval (76.90), 22 languages |
 | Vector store | Qdrant local mode | No server, on-disk HNSW, incremental upsert |
 | LLM extraction | Fireworks `kimi-k2p5` | High extraction quality, runs offline after session |
 | Note format | Markdown + YAML frontmatter | Obsidian-compatible, plain text, Zettelkasten |
@@ -59,7 +59,7 @@ Background worker  (launchd WatchPaths)
 ### Prerequisites
 
 - Python 3.10+
-- [Cohere API key](https://dashboard.cohere.com/api-keys) — embeddings and retrieval, free tier: 1000 calls/month
+- [Voyage AI API key](https://dash.voyageai.com) — embeddings and retrieval, 200M tokens free
 - [Fireworks API key](https://fireworks.ai) — end-of-session LLM extraction, pay-per-use
 - Claude Code with hooks enabled
 - **For v3 proactive memory (optional):** an MCP server exposing a `vault_add_note` tool, so Claude can write notes mid-session without waiting for the end-of-session pass
@@ -67,8 +67,8 @@ Background worker  (launchd WatchPaths)
 ### Setup
 
 ```bash
-git clone https://github.com/tofunori/claude-vault-memory
-cd claude-vault-memory
+git clone https://github.com/tofunori/Claude-Vault-Memory
+cd Claude-Vault-Memory
 
 # Copy and edit config
 cp config.example.py config.py
@@ -79,8 +79,8 @@ bash install.sh
 ```
 
 The installer will:
-1. Install Python dependencies (`cohere`, `qdrant-client`, `openai`)
-2. Prompt for `COHERE_API_KEY` and `FIREWORKS_API_KEY` and write them to `.env`
+1. Install Python dependencies (`voyageai`, `qdrant-client`, `openai`)
+2. Prompt for `VOYAGE_API_KEY` and `FIREWORKS_API_KEY` and write them to `.env`
 3. Build the initial Qdrant index from your vault notes
 
 ### API keys
@@ -88,7 +88,7 @@ The installer will:
 Add to your `.env` file (path set in `config.py`):
 
 ```
-COHERE_API_KEY=<your-cohere-key>
+VOYAGE_API_KEY=<your-voyage-key>
 FIREWORKS_API_KEY=<your-fireworks-key>
 ```
 
@@ -104,7 +104,7 @@ Add to `~/.claude/settings.json`:
       "hooks": [
         {
           "type": "command",
-          "command": "python3 /path/to/claude-vault-memory/vault_retrieve.py"
+          "command": "python3 /path/to/Claude-Vault-Memory/vault_retrieve.py"
         }
       ]
     }
@@ -114,7 +114,7 @@ Add to `~/.claude/settings.json`:
       "hooks": [
         {
           "type": "command",
-          "command": "python3 /path/to/claude-vault-memory/enqueue.py"
+          "command": "python3 /path/to/Claude-Vault-Memory/enqueue.py"
         }
       ]
     }
@@ -204,7 +204,9 @@ All parameters live in `config.py` (never committed):
 | `DEDUP_THRESHOLD` | `0.85` | Cosine score above which a new note extends an existing one |
 | `MIN_QUERY_LENGTH` | `20` | Minimum message length in chars to trigger retrieval |
 | `MIN_TURNS` | `5` | Minimum session turns to enqueue for extraction |
-| `COHERE_BATCH_SIZE` | `96` | Batch size for Cohere embedding calls |
+| `VOYAGE_EMBED_MODEL` | `voyage-4-large` | Voyage AI model for embeddings |
+| `EMBED_DIM` | `1024` | Vector dimension (must match the model's output) |
+| `EMBED_BATCH_SIZE` | `128` | Batch size for Voyage AI embedding calls |
 
 ---
 

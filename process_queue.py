@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from config import (
         VAULT_NOTES_DIR, LOG_FILE, ENV_FILE, QUEUE_DIR, QDRANT_PATH,
-        DEDUP_THRESHOLD, FIREWORKS_BASE_URL, FIREWORKS_MODEL,
+        DEDUP_THRESHOLD, FIREWORKS_BASE_URL, FIREWORKS_MODEL, VOYAGE_EMBED_MODEL,
     )
     VAULT_NOTES_DIR = Path(VAULT_NOTES_DIR)
     LOG_FILE = Path(LOG_FILE)
@@ -60,27 +60,27 @@ def load_env_file() -> dict:
 
 
 def get_embed_clients():
-    """Returns (cohere.ClientV2, QdrantClient) or (None, None) if unavailable."""
+    """Returns (voyageai.Client, QdrantClient) or (None, None) if unavailable."""
     try:
-        import cohere
+        import voyageai
         from qdrant_client import QdrantClient
     except ImportError:
         return None, None
 
     env = load_env_file()
-    api_key = env.get("COHERE_API_KEY") or os.environ.get("COHERE_API_KEY", "")
+    api_key = env.get("VOYAGE_API_KEY") or os.environ.get("VOYAGE_API_KEY", "")
     if not api_key or api_key.startswith("<"):
         return None, None
     if not QDRANT_PATH.exists():
         return None, None
 
     try:
-        co = cohere.ClientV2(api_key)
+        vo = voyageai.Client(api_key=api_key)
         qd = QdrantClient(path=str(QDRANT_PATH))
         existing = {c.name for c in qd.get_collections().collections}
         if COLLECTION not in existing:
             return None, None
-        return co, qd
+        return vo, qd
     except Exception as e:
         log(f"EMBED clients error: {e}")
         return None, None
@@ -89,18 +89,18 @@ def get_embed_clients():
 def check_semantic_dup(content: str) -> tuple[bool, str]:
     """Returns (True, target_id) if similar content already exists in Qdrant."""
     try:
-        co, qd = get_embed_clients()
-        if co is None:
+        vo, qd = get_embed_clients()
+        if vo is None:
             return False, ""
-        resp = co.embed(
-            model="embed-multilingual-v3.0",
-            texts=[content[:500]],
-            input_type="search_query",
-            embedding_types=["float"],
+        result = vo.embed(
+            [content[:500]],
+            model=VOYAGE_EMBED_MODEL,
+            input_type="query",
+            truncation=True,
         )
         response = qd.query_points(
             collection_name=COLLECTION,
-            query=resp.embeddings.float_[0],
+            query=result.embeddings[0],
             limit=1,
             score_threshold=DEDUP_THRESHOLD,
         )

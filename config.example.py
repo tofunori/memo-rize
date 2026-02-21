@@ -19,11 +19,20 @@ QUEUE_DIR = "/home/yourname/.claude/hooks/queue"
 LOG_FILE = "/home/yourname/.claude/hooks/auto_remember.log"
 
 
-# ─── Models ───────────────────────────────────────────────────────────────────
+# ─── Embedding model ──────────────────────────────────────────────────────────
 
-# Cohere embeddings (multilingual, 1024 dims)
-COHERE_EMBED_MODEL = "embed-multilingual-v3.0"
+# Voyage AI embedding model
+VOYAGE_EMBED_MODEL = "voyage-4-large"
+
+# Output dimension — voyage-4-large supports 256 / 512 / 1024 / 2048
+# Higher = better quality, larger index. 1024 is a good default.
 EMBED_DIM = 1024
+
+# Batch size for Voyage AI embed calls (max 128 texts per request)
+EMBED_BATCH_SIZE = 128
+
+
+# ─── LLM extraction ───────────────────────────────────────────────────────────
 
 # LLM for fact extraction (via OpenAI-compatible API)
 FIREWORKS_MODEL = "accounts/fireworks/models/kimi-k2p5"
@@ -44,6 +53,3 @@ MIN_QUERY_LENGTH = 20
 
 # Minimum number of turns in a session to enqueue for extraction
 MIN_TURNS = 5
-
-# Maximum batch size for Cohere API calls
-COHERE_BATCH_SIZE = 96
