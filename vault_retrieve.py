@@ -81,6 +81,23 @@ try:
     from config import DECAY_FLOOR
 except ImportError:
     DECAY_FLOOR = 0.3
+try:
+    from config import RERANK_ENABLED
+except ImportError:
+    RERANK_ENABLED = True
+try:
+    from config import RERANK_MODEL
+except ImportError:
+    RERANK_MODEL = "rerank-2"
+try:
+    from config import RERANK_CANDIDATES
+except ImportError:
+    RERANK_CANDIDATES = 10
+try:
+    from config import BM25_INDEX_PATH as _BM25_INDEX_PATH
+    BM25_INDEX_PATH = Path(_BM25_INDEX_PATH)
+except ImportError:
+    BM25_INDEX_PATH = None  # Will fallback to live scan
 
 COLLECTION = "vault_notes"
 TODAY = date.today().isoformat()
@@ -141,13 +158,18 @@ def tokenize(text: str) -> list[str]:
     return [w for w in words if w not in STOPWORDS and len(w) > 1]
 
 
-def bm25_search(query: str, top_k: int = 10) -> list[dict]:
-    """Simple BM25 keyword search over vault notes. Zero external dependencies."""
-    query_tokens = tokenize(query)
-    if not query_tokens:
-        return []
+def _load_bm25_index() -> list[dict] | None:
+    """Load persistent BM25 index. Returns None if unavailable."""
+    if BM25_INDEX_PATH and BM25_INDEX_PATH.exists():
+        try:
+            return json.loads(BM25_INDEX_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return None
 
-    # Build mini-index: scan note files
+
+def _build_live_index() -> list[dict]:
+    """Build BM25 index from vault files on the fly (fallback)."""
     docs = []
     for p in VAULT_NOTES_DIR.glob("*.md"):
         if p.name.startswith(".") or p.name.startswith("_"):
@@ -160,8 +182,7 @@ def bm25_search(query: str, top_k: int = 10) -> list[dict]:
             tokens = tokenize(text)
             docs.append({
                 "note_id": p.stem,
-                "tokens": tokens,
-                "tf": Counter(tokens),
+                "tf": dict(Counter(tokens)),
                 "len": len(tokens),
                 "description": desc_m.group(1).strip() if desc_m else p.stem,
                 "type": type_m.group(1).strip() if type_m else "?",
@@ -169,45 +190,62 @@ def bm25_search(query: str, top_k: int = 10) -> list[dict]:
             })
         except Exception:
             continue
+    return docs
 
-    if not docs:
-        return []
 
-    # BM25 parameters
+def _score_bm25(docs: list[dict], query_tokens: list[str]) -> list[dict]:
+    """Score documents using BM25 algorithm."""
     k1 = 1.5
     b = 0.75
     N = len(docs)
     avgdl = sum(d["len"] for d in docs) / N if N else 1
 
-    # Document frequency for each query token
     df = {}
     for token in set(query_tokens):
-        df[token] = sum(1 for d in docs if token in d["tf"])
+        df[token] = sum(1 for d in docs if token in d.get("tf", {}))
 
-    # Score each document
     for doc in docs:
         score = 0.0
+        tf_map = doc.get("tf", {})
         for token in query_tokens:
             if token not in df or df[token] == 0:
                 continue
             idf = math.log((N - df[token] + 0.5) / (df[token] + 0.5) + 1)
-            tf = doc["tf"].get(token, 0)
+            tf = tf_map.get(token, 0)
             tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc["len"] / avgdl))
             score += idf * tf_norm
         doc["bm25_score"] = score
 
-    # Sort and return top_k
-    docs.sort(key=lambda d: d["bm25_score"], reverse=True)
+    return docs
+
+
+def bm25_search(query: str, top_k: int = 10) -> list[dict]:
+    """BM25 keyword search. Uses persistent index if available, falls back to live scan."""
+    query_tokens = tokenize(query)
+    if not query_tokens:
+        return []
+
+    # Try persistent index first, fall back to live scan
+    docs = _load_bm25_index()
+    if docs is None:
+        docs = _build_live_index()
+
+    if not docs:
+        return []
+
+    docs = _score_bm25(docs, query_tokens)
+    docs.sort(key=lambda d: d.get("bm25_score", 0), reverse=True)
+
     return [
         {
             "note_id": d["note_id"],
-            "description": d["description"],
-            "type": d["type"],
-            "confidence": d["confidence"],
+            "description": d.get("description", d["note_id"]),
+            "type": d.get("type", "?"),
+            "confidence": d.get("confidence", "experimental"),
             "score": d["bm25_score"],
         }
         for d in docs[:top_k]
-        if d["bm25_score"] > 0
+        if d.get("bm25_score", 0) > 0
     ]
 
 
@@ -375,6 +413,37 @@ def pad_unscored(
     return result
 
 
+# ─── Voyage AI Reranking ────────────────────────────────────────────────────
+
+
+def rerank_with_voyage(query: str, candidates: list[dict], vo, top_k: int = 3) -> list[dict]:
+    """Rerank candidates using Voyage AI reranker for higher precision."""
+    try:
+        # Build documents list: description + note_id for context
+        documents = [
+            f"{c.get('description', '')} [{c['note_id']}]"
+            for c in candidates
+        ]
+        result = vo.rerank(
+            query=query[:1000],
+            documents=documents,
+            model=RERANK_MODEL,
+            top_k=top_k,
+        )
+        # Map reranked results back to candidate dicts
+        reranked = []
+        for r in result.results:
+            idx = r.index
+            if idx < len(candidates):
+                entry = candidates[idx].copy()
+                entry["rerank_score"] = r.relevance_score
+                reranked.append(entry)
+        return reranked
+    except Exception as e:
+        log(f"RERANK error (falling back to RRF order): {e}")
+        return candidates[:top_k]
+
+
 # ─── Last Retrieved Tracking ────────────────────────────────────────────────
 
 
@@ -471,11 +540,20 @@ def main():
         if BM25_ENABLED and VAULT_NOTES_DIR.exists():
             keyword_results = bm25_search(query, top_k=BM25_TOP_K)
             if keyword_results or vector_results:
-                primary = rrf_merge(vector_results, keyword_results, k=RRF_K, top_k=RRF_FINAL_TOP_K)
+                # Get more candidates for reranking
+                rrf_top = RERANK_CANDIDATES if RERANK_ENABLED else RRF_FINAL_TOP_K
+                primary = rrf_merge(vector_results, keyword_results, k=RRF_K, top_k=rrf_top)
             else:
                 primary = []
         else:
             primary = vector_results[:TOP_K]
+
+        if not primary:
+            sys.exit(0)
+
+        # ── Voyage AI reranking (precision layer) ──
+        if RERANK_ENABLED and len(primary) > RRF_FINAL_TOP_K:
+            primary = rerank_with_voyage(query, primary, vo, top_k=RRF_FINAL_TOP_K)
 
         if not primary:
             sys.exit(0)
@@ -522,7 +600,7 @@ def main():
 
         # ── Logging ──
         cache_status = "ok" if outbound else "miss"
-        search_mode = "hybrid" if BM25_ENABLED else "vector"
+        search_mode = "hybrid+rerank" if (BM25_ENABLED and RERANK_ENABLED) else ("hybrid" if BM25_ENABLED else "vector")
         log(f"RETRIEVE [{search_mode}] query={len(query)}c → {len(primary)} primary + {len(scored)} graph [cache={cache_status}] (threshold {SCORE_THRESHOLD})")
 
     except Exception as e:

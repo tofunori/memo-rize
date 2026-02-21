@@ -112,3 +112,39 @@ MAX_CODE_BLOCK_CHARS = 500
 
 # Minimum number of new turns to re-enqueue a grown session
 MIN_NEW_TURNS = 10
+
+
+# ─── Reranking ───────────────────────────────────────────────────────────────
+
+# Enable Voyage AI reranking after RRF fusion (improves precision, adds ~100ms)
+RERANK_ENABLED = True
+
+# Voyage AI reranking model
+RERANK_MODEL = "rerank-2"
+
+# Number of candidates to feed to the reranker (before final top_k selection)
+RERANK_CANDIDATES = 10
+
+
+# ─── BM25 persistent index ──────────────────────────────────────────────────
+
+# Path to the persistent BM25 index (rebuilt by vault_embed.py)
+BM25_INDEX_PATH = "/home/yourname/.claude/hooks/vault_bm25_index.json"
+
+
+# ─── Extraction validation ───────────────────────────────────────────────────
+
+# Enable second-pass validation of extracted facts (catches hallucinated extractions)
+VALIDATION_ENABLED = True
+
+
+# ─── Reflector ───────────────────────────────────────────────────────────────
+
+# Minimum number of notes to trigger reflection (below this, vault is too small)
+REFLECT_MIN_NOTES = 30
+
+# Cosine similarity threshold to consider notes as a mergeable cluster
+REFLECT_CLUSTER_THRESHOLD = 0.82
+
+# Maximum age in days before a never-retrieved note is flagged as stale
+REFLECT_STALE_DAYS = 180

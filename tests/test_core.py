@@ -282,5 +282,84 @@ class TestConfidenceBoost(TestCase):
         self.assertEqual(apply_confidence_boost(None), 1.0)
 
 
+class TestBM25Search(TestCase):
+    """Test BM25 internal functions."""
+
+    def test_tokenize(self):
+        from vault_retrieve import tokenize
+        tokens = tokenize("Hello World, this is a test with Python3")
+        self.assertIn("hello", tokens)
+        self.assertIn("world", tokens)
+        self.assertIn("python3", tokens)
+        self.assertIn("test", tokens)
+        # Stopwords removed
+        self.assertNotIn("this", tokens)
+        self.assertNotIn("is", tokens)
+
+    def test_tokenize_code_terms(self):
+        from vault_retrieve import tokenize
+        tokens = tokenize("vault_embed.py uses qdrant-client v1.2")
+        self.assertIn("vault_embed.py", tokens)
+        self.assertIn("qdrant-client", tokens)
+        self.assertIn("v1.2", tokens)
+
+    def test_score_bm25_basic(self):
+        from vault_retrieve import _score_bm25
+        docs = [
+            {"note_id": "a", "tf": {"python": 3, "code": 1}, "len": 10},
+            {"note_id": "b", "tf": {"javascript": 2, "code": 1}, "len": 10},
+        ]
+        scored = _score_bm25(docs, ["python"])
+        self.assertGreater(scored[0]["bm25_score"], 0)
+        self.assertEqual(scored[1]["bm25_score"], 0)  # No match for "python"
+
+    def test_persistent_index_load(self):
+        """Test that _load_bm25_index returns None when no index exists."""
+        from vault_retrieve import _load_bm25_index
+        # With default path (None or non-existent), should return None
+        result = _load_bm25_index()
+        # Should be None (no persistent index in test env)
+        self.assertIsNone(result)
+
+
+class TestValidation(TestCase):
+    """Test extraction validation logic."""
+
+    def test_validation_disabled_returns_all(self):
+        from process_queue import validate_extracted_facts
+        import process_queue
+        original = process_queue.VALIDATION_ENABLED
+        process_queue.VALIDATION_ENABLED = False
+        facts = [{"note_id": "test", "content": "test"}]
+        result = validate_extracted_facts(facts, "conversation")
+        self.assertEqual(result, facts)
+        process_queue.VALIDATION_ENABLED = original
+
+    def test_validation_empty_facts(self):
+        from process_queue import validate_extracted_facts
+        result = validate_extracted_facts([], "conversation")
+        self.assertEqual(result, [])
+
+
+class TestSessionBrief(TestCase):
+    """Test session brief parsing."""
+
+    def test_parse_frontmatter(self):
+        from vault_session_brief import parse_frontmatter
+        text = """---
+description: Test note about Python
+type: preference
+confidence: confirmed
+created: 2026-01-15
+---
+
+# Test note"""
+        fm = parse_frontmatter(text)
+        self.assertEqual(fm["description"], "Test note about Python")
+        self.assertEqual(fm["type"], "preference")
+        self.assertEqual(fm["confidence"], "confirmed")
+        self.assertEqual(fm["created"], "2026-01-15")
+
+
 if __name__ == "__main__":
     unittest_main()

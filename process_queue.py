@@ -51,6 +51,11 @@ try:
 except ImportError:
     MAX_CODE_BLOCK_CHARS = 500
 
+try:
+    from config import VALIDATION_ENABLED
+except ImportError:
+    VALIDATION_ENABLED = True
+
 PROCESSED_DIR = QUEUE_DIR / "processed"
 COLLECTION = "vault_notes"
 
@@ -470,6 +475,84 @@ def _repair_json_newlines(raw: str) -> str:
     return ''.join(result)
 
 
+# ─── Extraction Validation ───────────────────────────────────────────────────
+
+
+def validate_extracted_facts(facts: list, conversation: str) -> list:
+    """Second-pass validation: check that extracted facts are actually grounded
+    in the conversation transcript. Removes hallucinated extractions."""
+    if not VALIDATION_ENABLED or not facts:
+        return facts
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return facts
+
+    env = load_env_file()
+    api_key = env.get("FIREWORKS_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
+    if not api_key:
+        return facts
+
+    client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
+
+    # Build compact summary of facts for validation
+    fact_summaries = []
+    for i, f in enumerate(facts):
+        desc = ""
+        content = f.get("content", "")
+        # Extract description from content frontmatter
+        desc_m = re.search(r'description:\s*(.+)', content)
+        if desc_m:
+            desc = desc_m.group(1).strip()
+        else:
+            desc = content[:150]
+        fact_summaries.append(f"{i}: [{f.get('relation', 'NEW')}] {f.get('note_id', '?')} — {desc}")
+
+    prompt = f"""You are a fact-checker. Given a conversation transcript and a list of extracted facts,
+identify which facts are NOT actually supported by the conversation.
+
+FACTS TO VALIDATE:
+{chr(10).join(fact_summaries)}
+
+CONVERSATION (last 5000 chars):
+{conversation[-5000:]}
+
+Return ONLY a JSON array of indices (0-based) of facts that ARE valid and grounded in the conversation.
+Example: [0, 2, 3] means facts 0, 2, and 3 are valid; fact 1 is hallucinated.
+If all facts are valid: {list(range(len(facts)))}
+If no facts are valid: []"""
+
+    try:
+        response = client.chat.completions.create(
+            model=FIREWORKS_MODEL,
+            max_tokens=500,
+            messages=[
+                {"role": "system", "content": "Output ONLY a JSON array of integers. No prose."},
+                {"role": "user", "content": prompt},
+            ]
+        )
+        raw = response.choices[0].message.content.strip()
+        raw = re.sub(r'^```(?:json)?\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        valid_indices = json.loads(raw)
+
+        if not isinstance(valid_indices, list):
+            return facts
+
+        validated = [facts[i] for i in valid_indices if isinstance(i, int) and 0 <= i < len(facts)]
+        rejected = len(facts) - len(validated)
+        if rejected > 0:
+            log(f"VALIDATION: {rejected}/{len(facts)} facts rejected as hallucinated")
+        else:
+            log(f"VALIDATION: all {len(facts)} facts confirmed")
+        return validated
+
+    except Exception as e:
+        log(f"VALIDATION error (keeping all facts): {e}")
+        return facts
+
+
 # ─── Atomic Write ────────────────────────────────────────────────────────────
 
 
@@ -620,6 +703,9 @@ def process_ticket(ticket_path: Path):
         return
 
     log(f"Facts extracted: {len(facts)}")
+
+    # Second-pass validation: reject hallucinated facts
+    facts = validate_extracted_facts(facts, conversation)
     written = 0
     for fact in facts:
         try:
