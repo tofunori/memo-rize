@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-process_queue.py — Worker asynchrone auto_remember
-Traite les tickets déposés par enqueue.py.
-Déclenché par launchd WatchPaths sur ~/.claude/hooks/queue/.
-Utilise Fireworks (kimi-k2) — latence sans importance, qualité maximale.
+process_queue.py — Async worker for auto_remember.
+Processes tickets dropped by enqueue.py.
+Triggered by launchd WatchPaths on the queue directory.
+Uses Fireworks (kimi-k2) — latency doesn't matter here, quality does.
 """
 
 import json
@@ -15,18 +15,25 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-VAULT_NOTES_DIR = Path("/Users/tofunori/Documents/UTQR/Master/knowledge/notes")
-LOG_FILE = Path("/Users/tofunori/.claude/hooks/auto_remember.log")
-ENV_FILE = Path("/Users/tofunori/.claude/hooks/.env")
-QUEUE_DIR = Path("/Users/tofunori/.claude/hooks/queue")
-PROCESSED_DIR = QUEUE_DIR / "processed"
-HOOKS_DIR = Path("/Users/tofunori/.claude/hooks")
-QDRANT_PATH = HOOKS_DIR / "vault_qdrant"
-COLLECTION = "vault_notes"
-DEDUP_THRESHOLD = 0.85  # Score cosine minimum pour considérer un doublon
+# Load config from same directory as this script
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from config import (
+        VAULT_NOTES_DIR, LOG_FILE, ENV_FILE, QUEUE_DIR, QDRANT_PATH,
+        DEDUP_THRESHOLD, FIREWORKS_BASE_URL, FIREWORKS_MODEL,
+    )
+    VAULT_NOTES_DIR = Path(VAULT_NOTES_DIR)
+    LOG_FILE = Path(LOG_FILE)
+    ENV_FILE = Path(ENV_FILE)
+    QUEUE_DIR = Path(QUEUE_DIR)
+    QDRANT_PATH = Path(QDRANT_PATH)
+    HOOKS_DIR = Path(ENV_FILE).parent
+except ImportError:
+    print("ERROR: config.py not found. Copy config.example.py to config.py and edit paths.", file=sys.stderr)
+    sys.exit(1)
 
-FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
-FIREWORKS_MODEL = "accounts/fireworks/models/kimi-k2p5"
+PROCESSED_DIR = QUEUE_DIR / "processed"
+COLLECTION = "vault_notes"
 
 TODAY = date.today().isoformat()
 
@@ -53,7 +60,7 @@ def load_env_file() -> dict:
 
 
 def get_embed_clients():
-    """Retourne (cohere.ClientV2, QdrantClient) ou (None, None) si indisponible."""
+    """Returns (cohere.ClientV2, QdrantClient) or (None, None) if unavailable."""
     try:
         import cohere
         from qdrant_client import QdrantClient
@@ -80,7 +87,7 @@ def get_embed_clients():
 
 
 def check_semantic_dup(content: str) -> tuple[bool, str]:
-    """Retourne (True, target_id) si contenu similaire existe déjà dans Qdrant."""
+    """Returns (True, target_id) if similar content already exists in Qdrant."""
     try:
         co, qd = get_embed_clients()
         if co is None:
@@ -105,7 +112,7 @@ def check_semantic_dup(content: str) -> tuple[bool, str]:
 
 
 def upsert_note_async(note_id: str):
-    """Lance vault_embed.py en arrière-plan pour upsert une note dans Qdrant."""
+    """Runs vault_embed.py in background to upsert a note into Qdrant."""
     try:
         script = str(HOOKS_DIR / "vault_embed.py")
         subprocess.Popen(
@@ -113,7 +120,7 @@ def upsert_note_async(note_id: str):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        log(f"EMBED async upsert lancé: {note_id}")
+        log(f"EMBED async upsert launched: {note_id}")
     except Exception as e:
         log(f"EMBED async upsert error: {e}")
 
@@ -142,7 +149,7 @@ def extract_conversation(jsonl_path: str, max_chars: int = 40000) -> tuple[str, 
                 except json.JSONDecodeError:
                     continue
     except Exception as e:
-        log(f"Erreur lecture transcript: {e}")
+        log(f"Error reading transcript: {e}")
 
     return "\n\n".join(turns)[:max_chars], len(turns)
 
@@ -168,7 +175,7 @@ def get_existing_notes_summary(notes_dir: Path, limit: int = 80) -> str:
             if len(lines) >= limit:
                 break
     except Exception as e:
-        log(f"Erreur listing notes: {e}")
+        log(f"Error listing notes: {e}")
     return "\n".join(lines)
 
 
@@ -176,53 +183,53 @@ def extract_facts_with_llm(conversation: str, existing_notes: str) -> list:
     try:
         from openai import OpenAI
     except ImportError:
-        log("Package openai non installé, skip")
+        log("openai package not installed, skipping")
         return []
 
     env = load_env_file()
     api_key = env.get("FIREWORKS_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
     if not api_key:
-        log("FIREWORKS_API_KEY absent, skip")
+        log("FIREWORKS_API_KEY missing, skipping")
         return []
 
     client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
 
-    prompt = f"""Tu es un agent de mémoire personnelle pour Thierry, un étudiant à la maîtrise.
+    prompt = f"""You are a personal memory agent for the owner of this knowledge vault.
 
-Extrais 0-15 faits atomiques DURABLES depuis cette session Claude Code.
+Extract 0-15 DURABLE atomic facts from this Claude Code session.
 
-RÈGLES STRICTES :
-- Capture TOUT ce qui est durable : décisions techniques, configs système, solutions à des problèmes, préférences découvertes, workflows établis, insights sur n'importe quel projet, faits appris, outils configurés
-- Le domaine importe peu : thèse, NAS, scripts, cours, infrastructure, lecture, etc.
-- Ignore : débogage temporaire sans résolution, bavardage, reformulations sans contenu nouveau, étapes intermédiaires
-- Titre = proposition testable ("X fait Y" — pas un label générique)
-- Maximum 15 notes. Zéro si vraiment rien de durable.
+STRICT RULES:
+- Capture everything durable: technical decisions, system configs, solutions to problems, discovered preferences, established workflows, insights about any project, learned facts, configured tools
+- Domain doesn't matter: thesis, NAS, scripts, courses, infrastructure, etc.
+- Ignore: temporary debugging without resolution, casual conversation, reformulations without new content, intermediate steps
+- Title = testable proposition ("X does Y" — not a generic label)
+- Maximum 15 notes. Zero if nothing truly durable.
 
-TYPES DE RELATION :
-- NEW : fait entièrement nouveau, absent des notes existantes
-- UPDATES:<note_id> : remplace une info existante (ex: seuil changé, valeur corrigée)
-- EXTENDS:<note_id> : complète sans remplacer (ex: détail supplémentaire sur méthode existante)
+RELATION TYPES:
+- NEW: entirely new fact, absent from existing notes
+- UPDATES:<note_id>: replaces existing info (e.g. threshold changed, value corrected)
+- EXTENDS:<note_id>: adds detail without replacing (e.g. extra detail on existing method)
 
-Notes existantes dans le vault :
+Existing notes in the vault:
 {existing_notes}
 
-FORMAT DE RÉPONSE — tableau JSON uniquement, aucun texte autour :
+RESPONSE FORMAT — JSON array only, no surrounding text:
 [
   {{
-    "note_id": "slug-kebab-case",
+    "note_id": "kebab-case-slug",
     "relation": "NEW",
     "documentDate": "{TODAY}",
     "eventDate": null,
-    "content": "---\\ndescription: [~150 chars, mécanisme ou portée]\\ntype: decision|result|method|concept|context|argument|module\\ncreated: {TODAY}\\nconfidence: experimental\\n---\\n\\n# Titre comme proposition\\n\\nCorps de la note...\\n\\n## Connexions\\n\\n- [[note-liée]]"
+    "content": "---\\ndescription: [~150 chars, mechanism or scope]\\ntype: decision|result|method|concept|context|argument|module\\ncreated: {TODAY}\\nconfidence: experimental\\n---\\n\\n# Title as a proposition\\n\\nNote body...\\n\\n## Links\\n\\n- [[related-note]]"
   }}
 ]
 
-Pour EXTENDS, le "content" est le texte additionnel à appendre (pas une note complète).
-Pour UPDATES, le "content" est la note complète révisée.
+For EXTENDS, "content" is the text to append (not a full note).
+For UPDATES, "content" is the complete revised note.
 
-Si zéro notes mémorables : []
+If zero memorable notes: []
 
-CONVERSATION DE LA SESSION :
+SESSION CONVERSATION:
 {conversation}"""
 
     raw = ""
@@ -237,15 +244,15 @@ CONVERSATION DE LA SESSION :
         raw = re.sub(r'^```(?:json)?\n?', '', raw)
         raw = re.sub(r'\n?```$', '', raw)
 
-        log(f"Réponse LLM ({len(raw)} chars): {raw[:300]}")
+        log(f"LLM response ({len(raw)} chars): {raw[:300]}")
         parsed = json.loads(raw)
         return parsed if isinstance(parsed, list) else []
 
     except json.JSONDecodeError as e:
-        log(f"JSON invalide depuis LLM: {e} — raw: {raw[:300]}")
+        log(f"Invalid JSON from LLM: {e} — raw: {raw[:300]}")
         return []
     except Exception as e:
-        log(f"Erreur API Fireworks: {e}")
+        log(f"Fireworks API error: {e}")
         return []
 
 
@@ -266,7 +273,7 @@ def write_note(note_id: str, content: str, relation: str):
         target_path = notes_dir / f"{target_id}.md"
         if target_path.exists():
             existing = target_path.read_text(encoding="utf-8")
-            extension = f"\n\n---\n*Extension auto {TODAY}:*\n\n{content}"
+            extension = f"\n\n---\n*Auto-extension {TODAY}:*\n\n{content}"
             target_path.write_text(existing + extension, encoding="utf-8")
             log(f"EXTENDED {target_id}")
             return
@@ -281,7 +288,7 @@ def process_ticket(ticket_path: Path):
     try:
         ticket = json.loads(ticket_path.read_text(encoding="utf-8"))
     except Exception as e:
-        log(f"Erreur lecture ticket {ticket_path.name}: {e}")
+        log(f"Error reading ticket {ticket_path.name}: {e}")
         return
 
     session_id = ticket.get("session_id", "unknown")
@@ -289,29 +296,27 @@ def process_ticket(ticket_path: Path):
 
     log(f"--- PROCESSING session={session_id[:8]}")
 
-    # Vault doit exister
     if not VAULT_NOTES_DIR.exists():
-        log(f"Vault introuvable: {VAULT_NOTES_DIR}, skip")
+        log(f"Vault not found: {VAULT_NOTES_DIR}, skipping")
         return
 
-    # Transcript doit exister
     if not transcript_path or not Path(transcript_path).exists():
-        log(f"Transcript introuvable: {transcript_path}, skip")
+        log(f"Transcript not found: {transcript_path}, skipping")
         _archive(ticket_path, session_id)
         return
 
     conversation, turn_count = extract_conversation(transcript_path)
-    log(f"Conversation: {turn_count} tours, {len(conversation)} chars")
+    log(f"Conversation: {turn_count} turns, {len(conversation)} chars")
 
     existing_notes = get_existing_notes_summary(VAULT_NOTES_DIR)
     facts = extract_facts_with_llm(conversation, existing_notes)
 
     if not facts:
-        log("Aucun fait mémorable extrait")
+        log("No memorable facts extracted")
         _archive(ticket_path, session_id)
         return
 
-    log(f"Faits extraits: {len(facts)}")
+    log(f"Facts extracted: {len(facts)}")
     written = 0
     for fact in facts:
         try:
@@ -319,10 +324,10 @@ def process_ticket(ticket_path: Path):
             relation = fact.get("relation", "NEW")
             content = fact.get("content", "").strip()
             if not note_id or not content:
-                log(f"Fait invalide ignoré: {fact}")
+                log(f"Invalid fact ignored: {fact}")
                 continue
 
-            # Déduplication sémantique : uniquement pour les faits NEW
+            # Semantic dedup: only for NEW facts
             if relation == "NEW":
                 is_dup, target_id = check_semantic_dup(content)
                 if is_dup and target_id:
@@ -332,7 +337,7 @@ def process_ticket(ticket_path: Path):
             write_note(note_id, content, relation)
             written += 1
 
-            # Upsert incrémental dans Qdrant après écriture
+            # Incremental upsert into Qdrant after writing
             actual_id = note_id
             if relation.startswith("UPDATES:"):
                 actual_id = relation.split(":", 1)[1].strip()
@@ -341,9 +346,9 @@ def process_ticket(ticket_path: Path):
             upsert_note_async(actual_id)
 
         except Exception as e:
-            log(f"Erreur écriture {fact.get('note_id', '?')}: {e}")
+            log(f"Error writing {fact.get('note_id', '?')}: {e}")
 
-    log(f"Notes écrites: {written}/{len(facts)}")
+    log(f"Notes written: {written}/{len(facts)}")
     _archive(ticket_path, session_id)
 
 
@@ -354,26 +359,24 @@ def _archive(ticket_path: Path, session_id: str):
         ticket_path.rename(dest)
         log(f"ARCHIVED session={session_id[:8]}")
     except Exception as e:
-        log(f"Erreur archivage: {e}")
+        log(f"Archive error: {e}")
 
 
 def main():
     try:
-        # Scanner tous les tickets en attente
         tickets = [
             f for f in QUEUE_DIR.glob("*.json")
             if f.is_file() and f.parent == QUEUE_DIR
         ]
 
         if not tickets:
-            log("Queue vide, rien à traiter")
+            log("Queue empty, nothing to process")
             sys.exit(0)
 
-        log(f"=== process_queue: {len(tickets)} ticket(s) à traiter")
+        log(f"=== process_queue: {len(tickets)} ticket(s) to process")
 
         for ticket_path in sorted(tickets, key=lambda f: f.stat().st_mtime):
             session_id = ticket_path.stem
-            # Déduplication : déjà archivé ?
             if (PROCESSED_DIR / ticket_path.name).exists():
                 log(f"SKIP (already processed) session={session_id[:8]}")
                 ticket_path.unlink(missing_ok=True)
@@ -383,7 +386,7 @@ def main():
         log("=== process_queue: done")
 
     except Exception as e:
-        log(f"Erreur fatale process_queue: {e}\n{traceback.format_exc()}")
+        log(f"Fatal error in process_queue: {e}\n{traceback.format_exc()}")
 
     sys.exit(0)
 

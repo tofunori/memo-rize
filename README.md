@@ -92,14 +92,16 @@ The PostToolUse hook `vault_embed_if_note.sh` only triggers on native Write/Edit
 ### Prerequisites
 
 - Python 3.10+
-- Cohere API key (free up to 1000 calls/month): [dashboard.cohere.com](https://dashboard.cohere.com/api-keys)
+- Cohere API key (embeddings, free up to 1000 calls/month): [dashboard.cohere.com](https://dashboard.cohere.com/api-keys)
+- Fireworks API key (LLM extraction, pay-per-use): [fireworks.ai](https://fireworks.ai)
 - Claude Code configured with hooks
+- **Optional (v3 proactive memory):** an MCP vault server that exposes a `vault_add_note` tool — this enables Claude to save facts mid-session without waiting for end-of-session extraction
 
 ### Steps
 
 ```bash
 # 1. Clone
-git clone https://github.com/yourname/claude-vault-memory
+git clone https://github.com/tofunori/claude-vault-memory
 cd claude-vault-memory
 
 # 2. Copy config
@@ -122,8 +124,12 @@ ENV_FILE = "/home/yourname/.claude/hooks/.env"
 
 Add to your `.env`:
 ```
-COHERE_API_KEY=<your-key>
+COHERE_API_KEY=<your-cohere-key>
+FIREWORKS_API_KEY=<your-fireworks-key>
 ```
+
+- **Cohere** (required for embeddings + retrieval): [dashboard.cohere.com](https://dashboard.cohere.com/api-keys) — free tier: 1000 calls/month
+- **Fireworks** (required for end-of-session extraction): [fireworks.ai](https://fireworks.ai) — pay-per-use, very low cost
 
 ### Claude Code settings.json
 

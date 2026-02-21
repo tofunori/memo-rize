@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-vault_embed.py — Build/upsert index Qdrant local depuis les notes du vault.
+vault_embed.py — Build/upsert local Qdrant index from vault notes.
 
 Usage:
-  python3 vault_embed.py              → full rebuild (toutes les notes)
-  python3 vault_embed.py --note ID    → upsert incrémental (une note)
-  python3 vault_embed.py --notes A B  → upsert incrémental (liste de notes)
+  python3 vault_embed.py              → full rebuild (all notes)
+  python3 vault_embed.py --note ID    → incremental upsert (single note)
+  python3 vault_embed.py --notes A B  → incremental upsert (list of notes)
 """
 
 import os
@@ -15,6 +15,8 @@ import uuid
 from datetime import date
 from pathlib import Path
 
+# Load config from same directory as this script
+sys.path.insert(0, str(Path(__file__).parent))
 try:
     from config import (
         VAULT_NOTES_DIR as _VAULT_NOTES_DIR,
@@ -64,19 +66,19 @@ def load_env_file() -> dict:
 
 
 def get_clients():
-    """Initialise Cohere et Qdrant. Crée la collection si absente."""
+    """Initialize Cohere and Qdrant. Creates collection if missing."""
     try:
         import cohere
         from qdrant_client import QdrantClient
         from qdrant_client.models import Distance, VectorParams
     except ImportError as e:
-        log(f"EMBED import error: {e} — installer: pip install cohere qdrant-client")
+        log(f"EMBED import error: {e} — install: pip install cohere qdrant-client")
         sys.exit(1)
 
     env = load_env_file()
     api_key = env.get("COHERE_API_KEY") or os.environ.get("COHERE_API_KEY", "")
     if not api_key or api_key.startswith("<"):
-        log("EMBED SKIP: COHERE_API_KEY absent ou placeholder dans .env")
+        log("EMBED SKIP: COHERE_API_KEY missing or placeholder in .env")
         sys.exit(0)
 
     co = cohere.ClientV2(api_key)
@@ -89,13 +91,13 @@ def get_clients():
             COLLECTION,
             vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE)
         )
-        log(f"EMBED collection créée: {COLLECTION}")
+        log(f"EMBED collection created: {COLLECTION}")
 
     return co, qd
 
 
 def parse_note(path: Path) -> dict | None:
-    """Extrait text et metadata d'une note markdown."""
+    """Extract text and metadata from a markdown note."""
     try:
         text = path.read_text(encoding="utf-8")
     except Exception:
@@ -132,7 +134,7 @@ def get_notes_to_embed(note_ids: list[str] | None = None) -> list[dict]:
                 if n:
                     notes.append(n)
             else:
-                log(f"EMBED WARN: note non trouvée: {nid}")
+                log(f"EMBED WARN: note not found: {nid}")
     else:
         for p in sorted(VAULT_NOTES_DIR.glob("*.md")):
             if p.name.startswith(".") or p.name.startswith("_"):
@@ -154,7 +156,7 @@ def upsert_notes(note_ids: list[str] | None = None):
     notes = get_notes_to_embed(note_ids)
 
     if not notes:
-        log("EMBED: aucune note à upsert")
+        log("EMBED: no notes to upsert")
         return
 
     total = 0

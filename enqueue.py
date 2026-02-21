@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-enqueue.py — Stop hook Claude Code (rapide, < 100ms)
-Dépose un ticket dans la queue pour traitement asynchrone par process_queue.py.
+enqueue.py — Stop hook for Claude Code (fast, < 100ms)
+Drops a ticket into the queue for async processing by process_queue.py.
 """
 
 import json
@@ -9,12 +9,14 @@ import sys
 from datetime import date
 from pathlib import Path
 
+# Load config from same directory as this script
+sys.path.insert(0, str(Path(__file__).parent))
 try:
     from config import QUEUE_DIR as _QUEUE_DIR, LOG_FILE as _LOG_FILE, MIN_TURNS
     QUEUE_DIR = Path(_QUEUE_DIR)
     LOG_FILE = Path(_LOG_FILE)
 except ImportError:
-    # Valeurs par défaut si config.py absent
+    # Fallback defaults if config.py is missing
     QUEUE_DIR = Path.home() / ".claude/hooks/queue"
     LOG_FILE = Path.home() / ".claude/hooks/auto_remember.log"
     MIN_TURNS = 5
