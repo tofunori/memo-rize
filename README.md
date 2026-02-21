@@ -1,6 +1,11 @@
 # Claude Vault Memory
 
-Persistent semantic memory for [Claude Code](https://claude.ai/claude-code). Every message you send is matched against a local knowledge graph of your markdown notes. Relevant notes are injected into Claude's context before it replies. At the end of each session, an LLM pass extracts durable facts and writes them back as typed, versioned atomic notes.
+Persistent semantic memory system for **Claude Code, Codex, and OpenClaw**.
+
+This repo now has two modes:
+
+- **Recommended (current): NAS unified memory** via `nas_memory/` (shared API + worker for all agents)
+- **Legacy:** local Claude-focused hook pipeline (kept for backward compatibility)
 
 ## NAS unified memory (V1.x / V1.3R)
 
@@ -20,9 +25,17 @@ Operational instructions for NAS mode are in:
 - `nas_memory/README.md`
 - `nas_memory/burnin/README.md`
 
+### Agent support (NAS mode)
+
+- **Claude Code**: thin hooks to `POST /retrieve` and `POST /events`
+- **Codex**: MCP memory bridge (`nas_memory/mcp_memory/`)
+- **OpenClaw**: same API contract (`/retrieve`, `/events`)
+
+In NAS mode, memory is centralized and shared across all three agents.
+
 ---
 
-## Architecture
+## Legacy Local Architecture (Claude Code)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
