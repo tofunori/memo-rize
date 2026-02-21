@@ -1,6 +1,7 @@
 # Secrets & config personnelle
 .env
-config.py
+/config.py
+!nas_memory/config.py
 
 # Index vectoriel Qdrant (reconstruit depuis vault_embed.py)
 vault_qdrant/

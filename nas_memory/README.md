@@ -66,7 +66,8 @@ source .venv/bin/activate
 pip install -r nas_memory/requirements.txt
 ```
 
-Ensure root `config.py` is present and points to NAS paths.
+`nas_memory/config.py` is now versioned and provides safe defaults.
+For production NAS paths, keep a repo-root `config.py` override (not versioned) or set `MEMORY_CORE_CONFIG` to a custom path.
 
 ## Run API
 
@@ -90,6 +91,17 @@ cp nas_memory/systemd/memory-api.service ~/.config/systemd/user/
 cp nas_memory/systemd/memory-worker.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now memory-api.service memory-worker.service
+```
+
+Enable compaction timers (profile + relations):
+
+```bash
+cp nas_memory/systemd/memory-profile-compact.service ~/.config/systemd/user/
+cp nas_memory/systemd/memory-profile-compact.timer ~/.config/systemd/user/
+cp nas_memory/systemd/memory-relation-compact.service ~/.config/systemd/user/
+cp nas_memory/systemd/memory-relation-compact.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now memory-profile-compact.timer memory-relation-compact.timer
 ```
 
 To start user services at boot without interactive login:
