@@ -1,446 +1,87 @@
 # Claude Vault Memory
 
-Persistent semantic memory system for **Claude Code, Codex, and OpenClaw**.
+Mémoire unifiée NAS pour **Claude Code + Codex + OpenClaw**.
 
-This repo now has two modes:
+Ce repo a été réorganisé pour séparer clairement:
 
-- **Recommended (current): NAS unified memory** via `nas_memory/` (shared API + worker for all agents)
-- **Legacy:** local Claude-focused hook pipeline (kept for backward compatibility)
+- `production NAS` (actif)
+- `legacy local` (archivé)
 
-## NAS unified memory (V1.x / V1.3R)
+## Ce qui est actif en production
 
-This repository now also includes a NAS-hosted unified memory stack for Claude Code, Codex, and OpenClaw:
+### 1) Couche NAS (orchestration moderne)
 
-- API + worker: `nas_memory/api.py`, `nas_memory/worker.py`
-- Single-writer queue (SQLite WAL) with staging/live memory and profile layer
-- Admin graph UI (`/admin/graph/ui`) and unified graph payload (`/admin/graph`)
-- V1.3R relation compaction (shadow/write mode) to reduce isolated memory nodes:
-  - admin endpoints: `/admin/relations/compact`, `/admin/relations/stats`
-  - linker engine: `nas_memory/relation_linker.py`
-  - hourly timer job: `nas_memory/systemd/memory-relation-compact.timer`
-- Burn-in tooling with strict gates in `nas_memory/burnin/`
+- `nas_memory/` contient l'API, le worker, la DB SQLite WAL, la sécurité, la couche profil/relations, le graph UI, et le burn-in.
+- Entrées principales:
+  - `nas_memory/api.py`
+  - `nas_memory/worker.py`
+  - `nas_memory/db.py`
+  - `nas_memory/graph_view.py`
+  - `nas_memory/relation_linker.py`
 
-Operational instructions for NAS mode are in:
+### 2) Moteur core (encore requis)
 
-- `nas_memory/README.md`
-- `nas_memory/burnin/README.md`
+Ces scripts racine sont **toujours utilisés** par `nas_memory` via subprocess:
 
-### Agent support (NAS mode)
+- `vault_retrieve.py`
+- `process_queue.py`
+- `vault_embed.py`
 
-- **Claude Code**: thin hooks to `POST /retrieve` and `POST /events`
-- **Codex**: MCP memory bridge (`nas_memory/mcp_memory/`)
-- **OpenClaw**: same API contract (`/retrieve`, `/events`)
+Ils restent donc au root pour la compatibilité runtime actuelle (V1.3R).
 
-In NAS mode, memory is centralized and shared across all three agents.
+## Ce qui est archivé (legacy local)
 
----
+Le pipeline local historique a été déplacé dans `legacy_local/`:
 
-## Legacy Local Architecture (Claude Code)
+- `legacy_local/enqueue.py`
+- `legacy_local/vault_session_brief.py`
+- `legacy_local/vault_status.py`
+- `legacy_local/vault_reflect.py`
+- `legacy_local/install.sh`
+- `legacy_local/launchd/`
+- `legacy_local/README_LOCAL_LEGACY.md` (ancienne doc complète)
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  SESSION START                                                       │
-│  vault_session_brief.py                                              │
-│    scan notes/ for confirmed preferences, recent decisions,          │
-│    active project context → inject brief into Claude context         │
-└─────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  EVERY USER MESSAGE                                                  │
-│  vault_retrieve.py  (UserPromptSubmit hook, ~200ms)                  │
-│                                                                      │
-│  ┌──────────────┐    ┌──────────────┐                               │
-│  │  BM25 search │    │ Vector search│  ◄── Voyage AI voyage-4-large  │
-│  │  (keyword)   │    │  (semantic)  │      embedded query            │
-│  └──────┬───────┘    └──────┬───────┘                               │
-│         └────────┬──────────┘                                        │
-│                  ▼                                                    │
-│         Reciprocal Rank Fusion (RRF)                                 │
-│                  │                                                    │
-│                  ▼                                                    │
-│         Voyage AI Reranker  ◄── rerank-2 (precision layer)           │
-│                  │                                                    │
-│                  ▼                                                    │
-│     temporal decay × confidence boost                                │
-│                  │                                                    │
-│         ┌────────┴────────┐                                          │
-│         │  top 3 primary  │  + source chunk excerpt injected         │
-│         └────────┬────────┘                                          │
-│                  │  BFS graph traversal (depth 2)                    │
-│                  ▼  backlinks + outbound links via graph cache        │
-│         ┌────────────────┐                                           │
-│         │  up to 5 linked│  connected notes                          │
-│         └────────────────┘                                           │
-│                  │                                                    │
-│                  ▼                                                    │
-│       inject into Claude context                                     │
-└─────────────────────────────────────────────────────────────────────┘
-                                  │
-                    (Claude detects a durable fact)
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  DURING SESSION  (proactive memory, v3+)                             │
-│                                                                      │
-│  vault_add_note(note_id, content)  ──── write note via MCP          │
-│         │                                                            │
-│         ▼                                                            │
-│  vault_embed.py --note {id}  ────────── index immediately in Qdrant │
-│                                         note retrievable next message│
-└─────────────────────────────────────────────────────────────────────┘
-                                  │
-                          (session ends)
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  SESSION END  (safety net)                                           │
-│  enqueue.py  (Stop hook, < 100ms, non-blocking)                      │
-│    write ticket → queue/{session_id}.json                            │
-│    re-enqueue if session grew by MIN_NEW_TURNS since last run        │
-└─────────────────────────────────────────────────────────────────────┘
-                                  │
-                  launchd WatchPaths triggers worker
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  BACKGROUND WORKER                                                   │
-│  process_queue.py                                                    │
-│                                                                      │
-│  extract LAST N turns  ──► avoids reading session-start summary      │
-│  strip UI tags  ─────────► remove <system-reminder> etc.             │
-│         │                                                            │
-│         ▼                                                            │
-│  pre-query vault  ──► embed conversation → 5 related notes           │
-│         │              inject as conflict context into LLM prompt    │
-│         ▼                                                            │
-│  LLM extraction  (Fireworks kimi-k2p5)                              │
-│    system message enforces JSON-only output                          │
-│    → 0–15 atomic facts with typed relations:                         │
-│      NEW          → brand new fact                                   │
-│      EXTENDS:id   → adds detail to existing note                     │
-│      UPDATES:id   → replaces note (marks old as superseded_by)       │
-│         │                                                            │
-│         ▼                                                            │
-│  _repair_json_newlines()  ──► fix unescaped newlines in strings      │
-│  validation pass  ─────────► second LLM call rejects hallucinations  │
-│  semantic dedup  ──────────► score > 0.85 → auto-convert NEW→EXTENDS │
-│         │                                                            │
-│         ▼                                                            │
-│  sanitize_note_id()  ────────► valid kebab-case filename             │
-│  fix_wikilinks_in_content()  ► [[Full Title]] → [[note-id]]          │
-│  write note (atomic)  ───────► temp file + rename, crash-safe        │
-│  save source chunk  ─────────► _sources/{note-id}.md                 │
-│  update graph cache  ────────► incremental outbound + backlinks       │
-│  upsert Qdrant  ─────────────► async vault_embed.py --note {id}      │
-│  archive ticket  ────────────► save turn_count for re-enqueue        │
-└─────────────────────────────────────────────────────────────────────┘
-                                  │
-                  weekly cron (Sundays)
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  MAINTENANCE                                                         │
-│  vault_reflect.py                                                    │
-│                                                                      │
-│  • Archive expired notes (forget_after date or type-based TTL)       │
-│    → move to _archived/ + remove from Qdrant                         │
-│  • Detect semantic clusters (cosine > 0.82) → suggest merges         │
-│  • Flag stale notes (not retrieved in 180+ days)                     │
-│  • Flag orphan notes (no incoming or outgoing links)                 │
-└─────────────────────────────────────────────────────────────────────┘
-```
+Ce dossier n'est plus le chemin recommandé pour la prod NAS.
 
----
+## Structure du repo
 
-## Stack
+- `nas_memory/` → stack multi-agent active (prod)
+- `vault_retrieve.py` → retrieval core appelé par API NAS
+- `process_queue.py` → consolidation core appelée par worker NAS
+- `vault_embed.py` → indexing core appelé par worker/API NAS
+- `tests/` → tests core historiques
+- `legacy_local/` → ancien mode local Claude-only
 
-| Component | Choice | Rationale |
-|-----------|--------|-----------|
-| Embeddings | Voyage AI `voyage-4-large` | #1 on MTEB multilingual retrieval (76.90), 22 languages |
-| Reranking | Voyage AI `rerank-2` | Precision layer after RRF fusion (+100ms, significant quality gain) |
-| Vector store | Qdrant local mode | No server, on-disk HNSW, incremental upsert |
-| Keyword search | BM25 (pure Python) | Hybrid search via RRF — catches exact terms vectors miss |
-| LLM extraction | Fireworks `kimi-k2p5` | High extraction quality, runs async after session |
-| Note format | Markdown + YAML frontmatter | Obsidian-compatible, plain text, git-trackable |
+## Documentation à suivre
 
----
+- Mode prod NAS: `nas_memory/README.md`
+- Burn-in et gates: `nas_memory/burnin/README.md`
+- Ancienne doc locale: `legacy_local/README_LOCAL_LEGACY.md`
 
-## Versions
-
-| Version | Change |
-|---------|--------|
-| v1 | Semantic retrieval at session start |
-| v2 | Graph traversal — connected notes surfaced via `## Links` wiki-links |
-| v3 | Proactive memory — Claude writes notes mid-session via MCP |
-| v4 | BFS 2-level graph traversal + backlinks + Qdrant scoring |
-| v5 | Link integrity: `sanitize_note_id`, `fix_wikilinks_in_content` |
-| v6 | Hybrid search (BM25+vector+RRF), temporal decay, confidence boost, conflict detection, observability |
-| v7 | Voyage reranking, session brief, extraction validation, persistent BM25 index, reflector |
-| v8 | Typed relations (relation/parent_note/superseded_by), source chunk storage, smart forgetting (forget_after + type TTL) |
-
----
-
-## Installation
-
-### Prerequisites
-
-- Python 3.10+
-- [Voyage AI API key](https://dash.voyageai.com) — embeddings and retrieval, 200M tokens free
-- [Fireworks API key](https://fireworks.ai) — end-of-session LLM extraction, pay-per-use
-- Claude Code with hooks enabled
-- **For v3 proactive memory (optional):** an MCP server exposing a `vault_add_note` tool, so Claude can write notes mid-session without waiting for the end-of-session pass
-
-### Setup
+## Déploiement NAS (résumé)
 
 ```bash
-git clone https://github.com/tofunori/Claude-Vault-Memory
-cd Claude-Vault-Memory
+cd /volume1/Services
 
-# Copy and edit config
-cp config.example.py config.py
-# Edit config.py: set VAULT_NOTES_DIR, QDRANT_PATH, ENV_FILE, QUEUE_DIR, LOG_FILE
+git clone https://github.com/tofunori/Claude-Vault-Memory.git memory
+cd memory
 
-# Run interactive installer (installs packages, prompts for API keys, builds index)
-bash install.sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r nas_memory/requirements.txt
+
+# config override (optionnel mais recommandé)
+# - root config.py non versionné
+# - ou MEMORY_CORE_CONFIG=<path>
+
+systemctl --user enable --now memory-api.service memory-worker.service
+systemctl --user enable --now memory-profile-compact.timer memory-relation-compact.timer
 ```
 
-The installer will:
-1. Install Python dependencies (`voyageai`, `qdrant-client`, `openai`)
-2. Prompt for `VOYAGE_API_KEY` and `FIREWORKS_API_KEY` and write them to `.env`
-3. Build the initial Qdrant index from your vault notes
+## État d'architecture
 
-### API keys
+- Source de vérité: NAS
+- Clients: thin-call only (`/retrieve`, `/events`)
+- Écriture mémoire: single-writer (`memory-worker`)
+- Relation compaction: shadow/write via flags d'env
 
-Add to your `.env` file (path set in `config.py`):
-
-```
-VOYAGE_API_KEY=<your-voyage-key>
-FIREWORKS_API_KEY=<your-fireworks-key>
-```
-
-### Claude Code hooks
-
-Add to `~/.claude/settings.json`:
-
-```json
-"hooks": {
-  "UserPromptSubmit": [
-    {
-      "matcher": "",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "python3 /path/to/Claude-Vault-Memory/vault_retrieve.py"
-        }
-      ]
-    }
-  ],
-  "Stop": [
-    {
-      "hooks": [
-        {
-          "type": "command",
-          "command": "python3 /path/to/Claude-Vault-Memory/enqueue.py"
-        }
-      ]
-    }
-  ]
-}
-```
-
-### Background worker (macOS)
-
-```bash
-cp launchd/com.example.vault-queue-worker.plist \
-   ~/Library/LaunchAgents/com.yourname.vault-queue-worker.plist
-
-# Edit all paths in the plist, then load
-launchctl load ~/Library/LaunchAgents/com.yourname.vault-queue-worker.plist
-```
-
-The worker is triggered automatically by `launchd` when a new ticket appears in the queue directory. It runs `process_queue.py`, which reads the session transcript, calls the Fireworks API, and writes the extracted notes to your vault.
-
----
-
-## v3 — Proactive Memory
-
-In v3, Claude writes notes **during** the session rather than waiting for the end-of-session extraction pass. This requires an MCP server with a `vault_add_note` tool.
-
-Add the following to your `CLAUDE.md` to enable the behavior:
-
-```markdown
-**Proactive memory:** without waiting for an explicit request, save immediately
-when you identify something clearly durable:
-- A technical decision made (config established, threshold validated, tool chosen)
-- A solution found (working command, bug resolved)
-- A workflow established (confirmed steps, functional pipeline)
-- A fact learned about infrastructure (paths, APIs, models, services)
-
-Do NOT save: casual conversation, intermediate debugging steps, reformulations.
-
-Process:
-1. Call vault_add_note(note_id, content) — complete note with YAML frontmatter
-2. Run: python3 /path/to/vault_embed.py --note {note_id}
-3. Confirm in one line: "saved: [[note_id]]"
-```
-
-The reason `vault_embed.py` must be called explicitly: the `PostToolUse` hook only fires on native `Write`/`Edit` tool calls, not on MCP tool calls like `vault_add_note`.
-
----
-
-## Note format
-
-Notes are plain markdown files with YAML frontmatter. The `description` field is used as the embedding text alongside the note body.
-
-```markdown
----
-description: One-sentence summary of the note (~150 chars)
-type: concept|context|argument|decision|method|result|module
-created: 2026-01-15
-confidence: experimental|confirmed
-
-# Auto-populated by the system (do not edit manually):
-relation: new|updates|extends        # how this note relates to the vault
-parent_note: old-note-id             # set when relation=updates|extends
-superseded_by: newer-note-id         # set on the old note when overwritten
-forget_after: 2026-04-01             # optional: auto-archive after this date
----
-
-# The note argues that X causes Y under condition Z
-
-Body of the note: mechanism, evidence, reasoning.
-
-## Links
-
-- [[related-note-slug]]
-- [[another-note]]
-```
-
-The title should read as a proposition ("this note argues that..."), not a label. This makes retrieval more precise and forces atomic thinking.
-
----
-
-## Configuration reference
-
-All parameters live in `config.py` (never committed — copy from `config.example.py`):
-
-**Paths**
-
-| Parameter | Description |
-|-----------|-------------|
-| `VAULT_NOTES_DIR` | Directory containing your `.md` notes |
-| `QDRANT_PATH` | On-disk path for the Qdrant collection |
-| `ENV_FILE` | Path to `.env` file with API keys |
-| `QUEUE_DIR` | Directory for async session tickets |
-| `LOG_FILE` | Path to `auto_remember.log` |
-| `GRAPH_CACHE_PATH` | Path to `vault_graph_cache.json` (auto-generated) |
-| `BM25_INDEX_PATH` | Path to `vault_bm25_index.json` (auto-generated) |
-
-**Retrieval**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `RETRIEVE_SCORE_THRESHOLD` | `0.60` | Minimum cosine score to surface a note |
-| `RETRIEVE_TOP_K` | `3` | Maximum primary notes returned per query |
-| `MIN_QUERY_LENGTH` | `20` | Minimum message length (chars) to trigger retrieval |
-| `BM25_ENABLED` | `True` | Enable BM25 keyword search (hybrid) |
-| `RRF_K` | `60` | Reciprocal Rank Fusion constant |
-| `RERANK_ENABLED` | `True` | Enable Voyage AI reranking (adds ~100ms, improves precision) |
-| `RERANK_MODEL` | `rerank-2` | Voyage reranking model |
-| `RERANK_CANDIDATES` | `10` | Candidates fed to reranker |
-| `CONFIDENCE_BOOST` | `1.2` | Score multiplier for `confidence: confirmed` notes |
-| `DECAY_ENABLED` | `True` | Enable temporal decay (recently accessed notes rank higher) |
-| `DECAY_HALF_LIFE_DAYS` | `90` | Days until retrieval score halves |
-| `DECAY_FLOOR` | `0.3` | Minimum decay factor |
-| `MAX_SECONDARY` | `5` | Max connected notes surfaced via BFS graph traversal |
-| `MAX_BACKLINKS_PER_NOTE` | `3` | Max backlinks injected per primary note |
-| `BFS_DEPTH` | `2` | BFS depth for graph traversal |
-
-**Extraction**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `FIREWORKS_MODEL` | `kimi-k2p5` | LLM for fact extraction (OpenAI-compatible API) |
-| `DEDUP_THRESHOLD` | `0.85` | Cosine score to auto-convert NEW → EXTENDS existing note |
-| `MIN_TURNS` | `5` | Minimum session turns to enqueue for extraction |
-| `VALIDATION_ENABLED` | `True` | Second LLM pass to reject hallucinated extractions |
-| `MAX_CODE_BLOCK_CHARS` | `500` | Max chars per code block in transcript (rest truncated) |
-
-**Source chunks**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `SOURCE_CHUNKS_ENABLED` | `True` | Save conversation excerpts that generated each note |
-| `SOURCE_CHUNKS_DIR` | `notes/_sources` | Directory for source chunk files |
-| `SOURCE_CHUNK_MAX_CHARS` | `2000` | Max chars of conversation saved per note |
-| `SOURCE_INJECT_MAX_CHARS` | `800` | Max chars of source context injected during retrieval |
-
-**Smart forgetting**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `FORGET_ARCHIVE_DIR` | `notes/_archived` | Destination for archived (expired) notes |
-| `FORGET_DEFAULT_TTL_DAYS` | `{}` | Per-type TTL in days, e.g. `{"context": 90}` |
-
-**Maintenance**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `REFLECT_MIN_NOTES` | `30` | Minimum vault size to run reflection |
-| `REFLECT_CLUSTER_THRESHOLD` | `0.82` | Cosine similarity to flag notes as mergeable cluster |
-| `REFLECT_STALE_DAYS` | `180` | Days without retrieval to flag a note as stale |
-
----
-
-## Usage
-
-```bash
-# Build or rebuild the full index (+ BM25 index + graph cache)
-python3 vault_embed.py
-
-# Incremental update after editing a note
-python3 vault_embed.py --note my-note-slug
-
-# Test retrieval manually
-echo '{"prompt":"your query here"}' | python3 vault_retrieve.py
-
-# Vault health dashboard
-python3 vault_status.py
-
-# Weekly maintenance (dry run)
-python3 vault_reflect.py
-
-# Weekly maintenance (apply: archive expired, mark stale)
-python3 vault_reflect.py --apply
-```
-
-**Smart forgetting** — mark a note as temporary by adding `forget_after` to its frontmatter:
-
-```yaml
----
-description: Current sprint context
-type: context
-forget_after: 2026-04-01
----
-```
-
-`vault_reflect --apply` will move it to `_archived/` and remove it from Qdrant once the date passes.
-
----
-
-## Logs
-
-All events are appended to `auto_remember.log`:
-
-```
-[2026-01-15] EMBED_INDEX upserted: 124 notes → /path/to/vault_qdrant
-[2026-01-16] RETRIEVE query=52c → 2 notes + 1 graph (threshold 0.6)
-[2026-01-16] ENQUEUED session=a3f1c9b2 turns=18
-[2026-01-16] PROCESSING session=a3f1c9b2
-[2026-01-16] NEW      my-new-note
-[2026-01-16] DEDUP: candidate-note → EXTENDS:existing-note
-[2026-01-16] ARCHIVED session=a3f1c9b2
-```
-
----
-
-## License
-
-MIT
