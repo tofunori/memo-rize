@@ -24,6 +24,9 @@ from process_queue import (
     fix_wikilinks_in_content,
     _repair_json_newlines,
     _truncate_code_blocks,
+    _inject_frontmatter_field,
+    write_file_atomic,
+    _add_superseded_by,
 )
 from vault_embed import build_graph_index
 
@@ -359,6 +362,217 @@ created: 2026-01-15
         self.assertEqual(fm["type"], "preference")
         self.assertEqual(fm["confidence"], "confirmed")
         self.assertEqual(fm["created"], "2026-01-15")
+
+
+class TestInjectFrontmatterField(TestCase):
+    """Test _inject_frontmatter_field: inserts fields into YAML frontmatter."""
+
+    def test_basic_injection(self):
+        content = "---\ndescription: test\ntype: concept\n---\n\n# Title"
+        result = _inject_frontmatter_field(content, "relation", "new")
+        self.assertIn("relation: new", result)
+        self.assertIn("---\n\n# Title", result)
+
+    def test_no_duplicate_injection(self):
+        content = "---\ndescription: test\nrelation: updates\n---\n\n# Title"
+        result = _inject_frontmatter_field(content, "relation", "new")
+        # Should not inject again
+        self.assertEqual(result, content)
+
+    def test_multiple_fields(self):
+        content = "---\ndescription: test\n---\n\n# Title"
+        result = _inject_frontmatter_field(content, "relation", "updates")
+        result = _inject_frontmatter_field(result, "parent_note", "old-note")
+        self.assertIn("relation: updates", result)
+        self.assertIn("parent_note: old-note", result)
+
+
+class TestSupersededBy(TestCase):
+    """Test _add_superseded_by: marks old notes as superseded."""
+
+    def test_adds_superseded_by(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            note_path = Path(tmpdir) / "old-note.md"
+            note_path.write_text("---\ndescription: old\ntype: concept\n---\n\n# Old note")
+            _add_superseded_by(note_path, "new-note")
+            content = note_path.read_text()
+            self.assertIn("superseded_by: new-note", content)
+
+    def test_no_duplicate_superseded(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            note_path = Path(tmpdir) / "old-note.md"
+            original = "---\ndescription: old\nsuperseded_by: first\n---\n\n# Old note"
+            note_path.write_text(original)
+            _add_superseded_by(note_path, "second")
+            content = note_path.read_text()
+            # Should not add a second superseded_by
+            self.assertEqual(content, original)
+
+
+class TestSourceChunkStorage(TestCase):
+    """Test source chunk saving logic."""
+
+    def test_save_and_load_chunk(self):
+        import process_queue as pq
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sources_dir = Path(tmpdir) / "_sources"
+            # Temporarily override
+            orig_dir = pq.SOURCE_CHUNKS_DIR
+            orig_enabled = pq.SOURCE_CHUNKS_ENABLED
+            pq.SOURCE_CHUNKS_DIR = sources_dir
+            pq.SOURCE_CHUNKS_ENABLED = True
+            try:
+                pq.save_source_chunk("test-note", "NEW", "This is the conversation content.")
+                chunk_path = sources_dir / "test-note.md"
+                self.assertTrue(chunk_path.exists())
+                content = chunk_path.read_text()
+                self.assertIn("source_for: test-note", content)
+                self.assertIn("This is the conversation content.", content)
+            finally:
+                pq.SOURCE_CHUNKS_DIR = orig_dir
+                pq.SOURCE_CHUNKS_ENABLED = orig_enabled
+
+    def test_disabled_no_save(self):
+        import process_queue as pq
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sources_dir = Path(tmpdir) / "_sources"
+            orig_dir = pq.SOURCE_CHUNKS_DIR
+            orig_enabled = pq.SOURCE_CHUNKS_ENABLED
+            pq.SOURCE_CHUNKS_DIR = sources_dir
+            pq.SOURCE_CHUNKS_ENABLED = False
+            try:
+                pq.save_source_chunk("test-note", "NEW", "Content")
+                self.assertFalse(sources_dir.exists())
+            finally:
+                pq.SOURCE_CHUNKS_DIR = orig_dir
+                pq.SOURCE_CHUNKS_ENABLED = orig_enabled
+
+    def test_extends_appends_to_existing(self):
+        import process_queue as pq
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sources_dir = Path(tmpdir) / "_sources"
+            orig_dir = pq.SOURCE_CHUNKS_DIR
+            orig_enabled = pq.SOURCE_CHUNKS_ENABLED
+            pq.SOURCE_CHUNKS_DIR = sources_dir
+            pq.SOURCE_CHUNKS_ENABLED = True
+            try:
+                pq.save_source_chunk("target-note", "NEW", "Original conversation.")
+                pq.save_source_chunk("ext-note", "EXTENDS:target-note", "Extension conversation.")
+                chunk_path = sources_dir / "target-note.md"
+                content = chunk_path.read_text()
+                self.assertIn("Original conversation.", content)
+                self.assertIn("Extension source", content)
+                self.assertIn("Extension conversation.", content)
+            finally:
+                pq.SOURCE_CHUNKS_DIR = orig_dir
+                pq.SOURCE_CHUNKS_ENABLED = orig_enabled
+
+
+class TestLoadSourceChunk(TestCase):
+    """Test source chunk loading for retrieval injection."""
+
+    def test_load_existing_chunk(self):
+        from vault_retrieve import load_source_chunk
+        import vault_retrieve as vr
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sources_dir = Path(tmpdir)
+            orig_dir = vr.SOURCE_CHUNKS_DIR
+            orig_enabled = vr.SOURCE_CHUNKS_ENABLED
+            vr.SOURCE_CHUNKS_DIR = sources_dir
+            vr.SOURCE_CHUNKS_ENABLED = True
+            try:
+                chunk_path = sources_dir / "my-note.md"
+                chunk_path.write_text("---\nsource_for: my-note\n---\n\nThe conversation excerpt here.")
+                result = load_source_chunk("my-note")
+                self.assertIsNotNone(result)
+                self.assertIn("conversation excerpt", result)
+            finally:
+                vr.SOURCE_CHUNKS_DIR = orig_dir
+                vr.SOURCE_CHUNKS_ENABLED = orig_enabled
+
+    def test_load_nonexistent_returns_none(self):
+        from vault_retrieve import load_source_chunk
+        import vault_retrieve as vr
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_dir = vr.SOURCE_CHUNKS_DIR
+            orig_enabled = vr.SOURCE_CHUNKS_ENABLED
+            vr.SOURCE_CHUNKS_DIR = Path(tmpdir)
+            vr.SOURCE_CHUNKS_ENABLED = True
+            try:
+                result = load_source_chunk("nonexistent")
+                self.assertIsNone(result)
+            finally:
+                vr.SOURCE_CHUNKS_DIR = orig_dir
+                vr.SOURCE_CHUNKS_ENABLED = orig_enabled
+
+    def test_disabled_returns_none(self):
+        from vault_retrieve import load_source_chunk
+        import vault_retrieve as vr
+        orig = vr.SOURCE_CHUNKS_ENABLED
+        vr.SOURCE_CHUNKS_ENABLED = False
+        try:
+            result = load_source_chunk("any-note")
+            self.assertIsNone(result)
+        finally:
+            vr.SOURCE_CHUNKS_ENABLED = orig
+
+
+class TestFindExpiredNotes(TestCase):
+    """Test smart forgetting: find_expired_notes."""
+
+    def test_forget_after_past(self):
+        from vault_reflect import find_expired_notes
+        notes = [
+            {"note_id": "old-note", "forget_after": "2020-01-01", "type": "context"},
+        ]
+        expired = find_expired_notes(notes)
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(expired[0]["note_id"], "old-note")
+
+    def test_forget_after_future(self):
+        from vault_reflect import find_expired_notes
+        future = (date.today() + timedelta(days=30)).isoformat()
+        notes = [
+            {"note_id": "future-note", "forget_after": future, "type": "context"},
+        ]
+        expired = find_expired_notes(notes)
+        self.assertEqual(len(expired), 0)
+
+    def test_no_forget_after_no_ttl(self):
+        from vault_reflect import find_expired_notes
+        notes = [
+            {"note_id": "normal-note", "type": "decision", "created": "2020-01-01"},
+        ]
+        expired = find_expired_notes(notes)
+        self.assertEqual(len(expired), 0)
+
+    def test_type_ttl_expired(self):
+        import vault_reflect as vr
+        orig = vr.FORGET_DEFAULT_TTL_DAYS
+        vr.FORGET_DEFAULT_TTL_DAYS = {"context": 30}
+        try:
+            old_date = (date.today() - timedelta(days=60)).isoformat()
+            notes = [
+                {"note_id": "ctx-note", "type": "context", "created": old_date},
+            ]
+            expired = vr.find_expired_notes(notes)
+            self.assertEqual(len(expired), 1)
+        finally:
+            vr.FORGET_DEFAULT_TTL_DAYS = orig
+
+    def test_type_ttl_not_expired(self):
+        import vault_reflect as vr
+        orig = vr.FORGET_DEFAULT_TTL_DAYS
+        vr.FORGET_DEFAULT_TTL_DAYS = {"context": 90}
+        try:
+            recent = (date.today() - timedelta(days=10)).isoformat()
+            notes = [
+                {"note_id": "recent-ctx", "type": "context", "created": recent},
+            ]
+            expired = vr.find_expired_notes(notes)
+            self.assertEqual(len(expired), 0)
+        finally:
+            vr.FORGET_DEFAULT_TTL_DAYS = orig
 
 
 if __name__ == "__main__":

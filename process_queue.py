@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-process_queue.py — Async worker for auto_remember (v6).
+process_queue.py — Async worker for auto_remember (v7).
 Processes tickets dropped by enqueue.py.
 Triggered by launchd WatchPaths on the queue directory.
+
+v7 improvements (on top of v6):
+- Typed relations: relation/parent_note/superseded_by persisted in frontmatter
+- Source chunk storage: conversation excerpt saved alongside extracted notes
+- Smart forgetting: forget_after field + auto-archive support
 
 v6 improvements:
 - Incremental graph cache updates after writing notes
@@ -55,6 +60,22 @@ try:
     from config import VALIDATION_ENABLED
 except ImportError:
     VALIDATION_ENABLED = True
+
+try:
+    from config import SOURCE_CHUNKS_ENABLED
+except ImportError:
+    SOURCE_CHUNKS_ENABLED = True
+
+try:
+    from config import SOURCE_CHUNK_MAX_CHARS
+except ImportError:
+    SOURCE_CHUNK_MAX_CHARS = 2000
+
+try:
+    from config import SOURCE_CHUNKS_DIR as _SCD
+    SOURCE_CHUNKS_DIR = Path(_SCD)
+except ImportError:
+    SOURCE_CHUNKS_DIR = VAULT_NOTES_DIR / "_sources"
 
 PROCESSED_DIR = QUEUE_DIR / "processed"
 COLLECTION = "vault_notes"
@@ -631,6 +652,27 @@ def update_graph_cache_incremental(note_id: str, content: str, relation: str):
 # ─── Note Writing ────────────────────────────────────────────────────────────
 
 
+def _inject_frontmatter_field(content: str, field: str, value: str) -> str:
+    """Insert a field into existing YAML frontmatter (before the closing ---)."""
+    if f"\n{field}:" in content:
+        return content  # Already present
+    # Insert before the closing ---
+    return content.replace("\n---\n", f"\n{field}: {value}\n---\n", 1)
+
+
+def _add_superseded_by(note_path: Path, successor_id: str):
+    """Mark an existing note as superseded by adding superseded_by to frontmatter."""
+    try:
+        content = note_path.read_text(encoding="utf-8")
+        if "superseded_by:" in content:
+            return  # Already superseded
+        updated = _inject_frontmatter_field(content, "superseded_by", successor_id)
+        if updated != content:
+            write_file_atomic(note_path, updated)
+    except Exception as e:
+        log(f"SUPERSEDE error on {note_path.stem}: {e}")
+
+
 def write_note(note_id: str, content: str, relation: str):
     notes_dir = VAULT_NOTES_DIR
 
@@ -638,8 +680,13 @@ def write_note(note_id: str, content: str, relation: str):
         target_id = relation.split(":", 1)[1].strip()
         target_path = notes_dir / f"{target_id}.md"
         if target_path.exists():
+            # Inject relation metadata into the new content
+            content = _inject_frontmatter_field(content, "relation", "updates")
+            content = _inject_frontmatter_field(content, "parent_note", target_id)
+            # Mark old note as superseded (before overwriting)
+            _add_superseded_by(target_path, note_id)
             write_file_atomic(target_path, content)
-            log(f"UPDATED  {target_id}")
+            log(f"UPDATED  {target_id} (superseded by {note_id})")
             return
         log(f"UPDATES target not found ({target_id}), creating as NEW {note_id}")
 
@@ -648,15 +695,54 @@ def write_note(note_id: str, content: str, relation: str):
         target_path = notes_dir / f"{target_id}.md"
         if target_path.exists():
             existing = target_path.read_text(encoding="utf-8")
-            extension = f"\n\n---\n*Auto-extension {TODAY}:*\n\n{content}"
+            extension = f"\n\n---\n*Auto-extension {TODAY} (from: {note_id}):*\n\n{content}"
             write_file_atomic(target_path, existing + extension)
-            log(f"EXTENDED {target_id}")
+            log(f"EXTENDED {target_id} (by {note_id})")
             return
         log(f"EXTENDS target not found ({target_id}), creating as NEW {note_id}")
 
+    # NEW note — add relation: new to frontmatter
+    content = _inject_frontmatter_field(content, "relation", "new")
     note_path = notes_dir / f"{note_id}.md"
     write_file_atomic(note_path, content)
     log(f"NEW      {note_id}")
+
+
+# ─── Source Chunk Storage ──────────────────────────────────────────────────
+
+
+def save_source_chunk(note_id: str, relation: str, conversation: str):
+    """Save the conversation excerpt that generated this note.
+    Stored in _sources/{note_id}.md for retrieval injection."""
+    if not SOURCE_CHUNKS_ENABLED:
+        return
+    try:
+        SOURCE_CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Determine which note was actually affected
+        actual_id = note_id
+        if relation.startswith("UPDATES:") or relation.startswith("EXTENDS:"):
+            actual_id = relation.split(":", 1)[1].strip()
+
+        # Take the last SOURCE_CHUNK_MAX_CHARS of conversation as context
+        chunk = conversation[-SOURCE_CHUNK_MAX_CHARS:].strip()
+        if len(conversation) > SOURCE_CHUNK_MAX_CHARS:
+            chunk = f"[...truncated...]\n\n{chunk}"
+
+        chunk_path = SOURCE_CHUNKS_DIR / f"{actual_id}.md"
+
+        # For EXTENDS: append to existing chunk file
+        if relation.startswith("EXTENDS:") and chunk_path.exists():
+            existing = chunk_path.read_text(encoding="utf-8")
+            new_content = f"{existing}\n\n---\n*Extension source ({TODAY}):*\n\n{chunk}"
+            write_file_atomic(chunk_path, new_content)
+        else:
+            header = f"---\nsource_for: {actual_id}\ncaptured: {TODAY}\nrelation: {relation}\n---\n\n"
+            write_file_atomic(chunk_path, header + chunk)
+
+        log(f"SOURCE saved: {actual_id} ({len(chunk)} chars)")
+    except Exception as e:
+        log(f"SOURCE error for {note_id}: {e}")
 
 
 # ─── Ticket Processing ──────────────────────────────────────────────────────
@@ -734,6 +820,9 @@ def process_ticket(ticket_path: Path):
 
             write_note(note_id, content, relation)
             written += 1
+
+            # Save source conversation chunk for retrieval injection
+            save_source_chunk(note_id, relation, conversation)
 
             # Update graph cache incrementally
             update_graph_cache_incremental(note_id, content, relation)

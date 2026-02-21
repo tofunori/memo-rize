@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-vault_retrieve.py — UserPromptSubmit hook, active retrieval (v6).
+vault_retrieve.py — UserPromptSubmit hook, active retrieval (v7).
 
 Input stdin : JSON from Claude Code {"prompt": "...", "session_id": "...", ...}
 Output      : text injected into Claude context (relevant notes)
+
+v7 improvements (on top of v6):
+- Source chunk injection: injects conversation excerpt that generated the note
 
 v6 improvements:
 - Hybrid search: BM25 keyword + vector + Reciprocal Rank Fusion
@@ -98,6 +101,22 @@ try:
     BM25_INDEX_PATH = Path(_BM25_INDEX_PATH)
 except ImportError:
     BM25_INDEX_PATH = None  # Will fallback to live scan
+
+try:
+    from config import SOURCE_CHUNKS_ENABLED
+except ImportError:
+    SOURCE_CHUNKS_ENABLED = True
+
+try:
+    from config import SOURCE_CHUNKS_DIR as _SCD
+    SOURCE_CHUNKS_DIR = Path(_SCD)
+except ImportError:
+    SOURCE_CHUNKS_DIR = VAULT_NOTES_DIR / "_sources"
+
+try:
+    from config import SOURCE_INJECT_MAX_CHARS
+except ImportError:
+    SOURCE_INJECT_MAX_CHARS = 800
 
 COLLECTION = "vault_notes"
 TODAY = date.today().isoformat()
@@ -444,6 +463,27 @@ def rerank_with_voyage(query: str, candidates: list[dict], vo, top_k: int = 3) -
         return candidates[:top_k]
 
 
+# ─── Source Chunk Injection ─────────────────────────────────────────────────
+
+
+def load_source_chunk(note_id: str) -> str | None:
+    """Load the source conversation chunk for a note, if available."""
+    if not SOURCE_CHUNKS_ENABLED:
+        return None
+    try:
+        chunk_path = SOURCE_CHUNKS_DIR / f"{note_id}.md"
+        if not chunk_path.exists():
+            return None
+        text = chunk_path.read_text(encoding="utf-8", errors="replace")
+        # Strip frontmatter from source chunk
+        body = re.sub(r'^---.*?---\s*', '', text, flags=re.DOTALL).strip()
+        if body:
+            return body[:SOURCE_INJECT_MAX_CHARS]
+    except Exception:
+        pass
+    return None
+
+
 # ─── Last Retrieved Tracking ────────────────────────────────────────────────
 
 
@@ -576,6 +616,14 @@ def main():
             lines.append(
                 f"[[{n['note_id']}]] ({n.get('type', '?')}, {score_pct}%{conf_tag}) — {n.get('description', '')}"
             )
+
+        # ── Source chunk injection (top primary note only, for detail) ──
+        if SOURCE_CHUNKS_ENABLED and primary:
+            top_note_id = primary[0]["note_id"]
+            source = load_source_chunk(top_note_id)
+            if source:
+                lines.append(f"\n=== Source context for [[{top_note_id}]] ===")
+                lines.append(source)
 
         # ── Graph traversal: BFS 2 levels + backlinks + Qdrant scoring ──
         outbound, backlinks = load_graph_cache()

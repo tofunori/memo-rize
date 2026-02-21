@@ -148,3 +148,32 @@ REFLECT_CLUSTER_THRESHOLD = 0.82
 
 # Maximum age in days before a never-retrieved note is flagged as stale
 REFLECT_STALE_DAYS = 180
+
+
+# ─── Source chunk storage ────────────────────────────────────────────────────
+
+# Save conversation excerpts that generated each note (for retrieval injection)
+SOURCE_CHUNKS_ENABLED = True
+
+# Directory for source chunks (default: VAULT_NOTES_DIR/_sources)
+SOURCE_CHUNKS_DIR = "/home/yourname/notes/_sources"
+
+# Maximum chars of conversation to save per note
+SOURCE_CHUNK_MAX_CHARS = 2000
+
+# Maximum chars of source context injected during retrieval (per note)
+SOURCE_INJECT_MAX_CHARS = 800
+
+
+# ─── Smart forgetting ───────────────────────────────────────────────────────
+
+# Directory for archived (forgotten) notes (default: VAULT_NOTES_DIR/_archived)
+FORGET_ARCHIVE_DIR = "/home/yourname/notes/_archived"
+
+# Default TTL (days) per note type. Notes of these types are auto-archived
+# after this many days since creation. Set to {} to disable type-based TTL.
+# Notes with an explicit forget_after frontmatter field are always respected.
+FORGET_DEFAULT_TTL_DAYS = {
+    # "context": 90,    # Context notes expire after 90 days
+    # "result": 60,     # Result notes expire after 60 days
+}
