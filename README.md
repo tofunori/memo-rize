@@ -1,4 +1,4 @@
-# claude-vault-memory
+# Claude Vault Memory
 
 Persistent semantic memory for [Claude Code](https://claude.ai/claude-code). Every message you send is matched against a local vector index of your markdown notes. Relevant notes are injected into Claude's context before it replies. At the end of each session, an LLM pass extracts durable facts and writes them back as new notes.
 
