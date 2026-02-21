@@ -19,6 +19,20 @@ python3 nas_memory/burnin/collector.py \
   --gate strict
 ```
 
+## Orchestration prod (shadow 24h -> write 72h)
+
+Ce script enchaîne automatiquement:
+1. `MEMORY_RELATION_WRITE=false` + burn-in strict 24h (shadow)
+2. si gate shadow `PASS`: `MEMORY_RELATION_WRITE=true` + burn-in strict 72h
+3. export d'un paquet d'audit manuel de 40 arêtes (`relation_precision_sample.md`)
+
+```bash
+bash nas_memory/burnin/run-shadow-then-write.sh
+```
+
+Artefacts dans:
+- `/volume1/Services/memory/state/burnin/prod-rollout-<timestamp>/`
+
 Artefacts produits:
 
 - `/volume1/Services/memory/state/burnin/<run_id>/config.json`
