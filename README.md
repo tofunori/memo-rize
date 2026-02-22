@@ -1,92 +1,225 @@
 # Memo-Rize: A Computational Memory Layer for Multi-Agent Systems
 
-Unified computational memory layer for **Claude Code, Codex, and OpenClaw**.
+Memo-Rize is a unified hosted memory backend for agent workflows.
+It supports **Claude Code**, **Codex**, and **OpenClaw** through one API and one write pipeline.
 
-Ce repo a été réorganisé pour séparer clairement:
+This project is **host-agnostic**: run it on a NAS, VM, bare-metal Linux host, or any machine that can run Python services.
 
-- `production NAS` (actif)
-- `legacy local` (archivé)
+## What Memo-Rize solves
 
-## Ce qui est actif en production
+Most agent setups fragment memory across tools, sessions, and machines.
+Memo-Rize centralizes memory so all agents can:
 
-### 1) Couche NAS (orchestration moderne)
+- retrieve shared context (`/retrieve`),
+- enqueue memory events (`/events`),
+- consolidate durable memory with a single writer,
+- inspect and govern memory through admin endpoints and graph UI.
 
-- `nas_memory/` contient l'API, le worker, la DB SQLite WAL, la sécurité, la couche profil/relations, le graph UI, et le burn-in.
-- Entrées principales:
-  - `nas_memory/api.py`
-  - `nas_memory/worker.py`
-  - `nas_memory/db.py`
-  - `nas_memory/graph_view.py`
-  - `nas_memory/relation_linker.py`
+## Design principles
 
-### 2) Moteur core canonique
+- **Single source of truth**: one hosted memory runtime.
+- **Single writer**: worker lock + queued writes to avoid corruption.
+- **Fail-open for tasks**: if memory is down, agents can continue their main task.
+- **Hybrid retrieval**: lexical + vector + rerank flow.
+- **Auditable governance**: versioning, forget/restore, relation compaction, graph inspection.
 
-Le moteur core est maintenant dans `nas_memory/core/`:
+## High-level architecture
 
-- `nas_memory/core/vault_retrieve.py`
-- `nas_memory/core/process_queue.py`
-- `nas_memory/core/vault_embed.py`
-- `nas_memory/core/runtime_config.py` (env-first + override fichier optionnel)
+```text
+Agents (Claude / Codex / OpenClaw)
+  -> POST /retrieve, POST /events
+  -> memory-api (FastAPI)
+  -> SQLite WAL queue
+  -> memory-worker (single writer)
+  -> core pipeline (retrieve/embed/consolidate)
+  -> notes + indexes + graph cache + memory nodes/edges
+```
 
-Pour compatibilite, les scripts root existent encore comme **shims**:
+## Repository layout
 
-- `vault_retrieve.py`
-- `process_queue.py`
-- `vault_embed.py`
+- `nas_memory/`: hosted runtime (API, worker, DB schema, security, graph UI, burn-in, systemd units).
+- `nas_memory/core/`: canonical core scripts.
+  - `nas_memory/core/vault_retrieve.py`
+  - `nas_memory/core/process_queue.py`
+  - `nas_memory/core/vault_embed.py`
+  - `nas_memory/core/runtime_config.py`
+- `vault_retrieve.py`, `process_queue.py`, `vault_embed.py`: backward-compatible root shims.
+- `legacy_local/`: archived local-only pipeline (read-only reference).
+- `tests/`: root compatibility/core tests.
+- `nas_memory/tests/`: runtime/admin/relation tests.
 
-Ils deleguent vers `nas_memory/core/*` et conservent la CLI historique.
+## Public API (stable)
 
-## Ce qui est archivé (legacy local)
+- `POST /retrieve`
+- `POST /events`
+- `GET /health`
+- `POST /admin/reindex`
+- `GET /admin/graph`
+- `GET /admin/graph/ui`
 
-Le pipeline local historique a été déplacé dans `legacy_local/`:
+Admin memory governance endpoints:
 
-- `legacy_local/enqueue.py`
-- `legacy_local/vault_session_brief.py`
-- `legacy_local/vault_status.py`
-- `legacy_local/vault_reflect.py`
-- `legacy_local/install.sh`
-- `legacy_local/launchd/`
-- `legacy_local/README_LOCAL_LEGACY.md` (ancienne doc complète)
+- `POST /admin/memory/forget`
+- `POST /admin/memory/restore`
+- `POST /admin/memory/upsert`
+- `GET /admin/profile`
+- `POST /admin/profile/compact`
+- `POST /admin/relations/compact`
+- `GET /admin/relations/stats`
 
-Ce dossier n'est plus le chemin recommandé pour la prod NAS.
+Auth: `Authorization: Bearer <MEMORY_API_TOKEN>`.
 
-## Structure du repo
+## Event model (`POST /events`)
 
-- `nas_memory/` → stack multi-agent active (prod)
-- `nas_memory/core/` → moteur core canonique (retrieval/consolidation/index)
-- `vault_retrieve.py`, `process_queue.py`, `vault_embed.py` → shims de compatibilite
-- `tests/` → tests core historiques
-- `legacy_local/` → ancien mode local Claude-only
+Supported `event_type` values:
 
-## Documentation à suivre
+- `turn`
+- `session_stop`
+- `note_add`
+- `memory_forget`
+- `memory_restore`
+- `memory_upsert`
+- `profile_compact`
+- `relation_compact`
 
-- Mode prod NAS: `nas_memory/README.md`
-- Burn-in et gates: `nas_memory/burnin/README.md`
-- Ancienne doc locale: `legacy_local/README_LOCAL_LEGACY.md`
+Core validations:
 
-## Déploiement NAS (résumé)
+- `session_stop` requires `payload.conversation_text`
+- `note_add` requires `payload.note_id` and `payload.note_content`
+
+## Quick start (hosted runtime)
 
 ```bash
-cd /volume1/Services
-
-git clone <your-repo-url> memory
-cd memory
+git clone <your-repo-url> memo-rize
+cd memo-rize
 
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r nas_memory/requirements.txt
+```
 
-# config override (optionnel)
-# - MEMORY_CORE_CONFIG=/path/to/config.py
-# - ou variables d'environnement directes (env-first)
+Set required environment variable:
 
+```bash
+export MEMORY_API_TOKEN="<strong-random-token>"
+```
+
+Optional (recommended) variables:
+
+- `MEMORY_API_HOST` (default `0.0.0.0`)
+- `MEMORY_API_PORT` (default `8766`)
+- `MEMORY_ROOT` (runtime root path)
+- `MEMORY_CORE_CONFIG` (optional file override path)
+- relation/profile tuning flags (see `nas_memory/README.md`)
+
+## Run services
+
+```bash
+./nas_memory/run-api.sh
+```
+
+```bash
+./nas_memory/run-worker.sh
+```
+
+## systemd (production)
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp nas_memory/systemd/memory-api.service ~/.config/systemd/user/
+cp nas_memory/systemd/memory-worker.service ~/.config/systemd/user/
+cp nas_memory/systemd/memory-profile-compact.service ~/.config/systemd/user/
+cp nas_memory/systemd/memory-profile-compact.timer ~/.config/systemd/user/
+cp nas_memory/systemd/memory-relation-compact.service ~/.config/systemd/user/
+cp nas_memory/systemd/memory-relation-compact.timer ~/.config/systemd/user/
+
+systemctl --user daemon-reload
 systemctl --user enable --now memory-api.service memory-worker.service
 systemctl --user enable --now memory-profile-compact.timer memory-relation-compact.timer
 ```
 
-## État d'architecture
+## Agent integrations
 
-- Source de vérité: NAS
-- Clients: thin-call only (`/retrieve`, `/events`)
-- Écriture mémoire: single-writer (`memory-worker`)
-- Relation compaction: shadow/write via flags d'env
+### Claude Code
+
+Use thin hooks that only call hosted endpoints:
+
+- retrieve hook -> `POST /retrieve`
+- stop hook -> `POST /events` (`session_stop`)
+
+### Codex
+
+Use MCP bridge in `nas_memory/mcp_memory/`.
+Example `~/.codex/config.toml` entry:
+
+```toml
+[mcp_servers.memory]
+type = "stdio"
+command = "ssh"
+args = ["<host-alias>", "bash '/path/to/memo-rize/nas_memory/mcp_memory/run-mcp.sh'"]
+```
+
+### OpenClaw
+
+Configure plugin/hooks to call:
+
+- `POST /retrieve`
+- `POST /events`
+
+## Operations and observability
+
+Health check:
+
+```bash
+curl -sS -H "Authorization: Bearer $MEMORY_API_TOKEN" \
+  "http://127.0.0.1:${MEMORY_API_PORT:-8766}/health"
+```
+
+Graph UI:
+
+```bash
+open "http://127.0.0.1:${MEMORY_API_PORT:-8766}/admin/graph/ui?token=$MEMORY_API_TOKEN"
+```
+
+Relation compaction stats:
+
+```bash
+curl -sS -H "Authorization: Bearer $MEMORY_API_TOKEN" \
+  "http://127.0.0.1:${MEMORY_API_PORT:-8766}/admin/relations/stats"
+```
+
+## Burn-in and rollout tools
+
+Burn-in toolkit lives in `nas_memory/burnin/`.
+
+- Pre-flight: `--duration-hours 0.5`
+- Strict run: `--duration-hours 72 --mode mixed --gate strict`
+- Orchestrated rollout: `run-shadow-then-write.sh` (24h shadow -> 72h write)
+
+See full operational details in `nas_memory/burnin/README.md`.
+
+## Testing
+
+Run core compatibility tests:
+
+```bash
+python3 -m unittest tests.test_runtime_compat tests.test_core
+```
+
+Run runtime test suite:
+
+```bash
+python3 -m unittest discover nas_memory/tests
+```
+
+## Compatibility and migration notes
+
+- Root scripts are retained as shims for backward compatibility.
+- Canonical core paths are now under `nas_memory/core/`.
+- `legacy_local/` remains archive-only and is not the recommended production path.
+
+## Additional documentation
+
+- Hosted runtime guide: `nas_memory/README.md`
+- Burn-in guide: `nas_memory/burnin/README.md`
+- Legacy archive: `legacy_local/README.md`
