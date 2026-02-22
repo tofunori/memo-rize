@@ -15,5 +15,6 @@ Ce dossier contient l'ancien pipeline mémoire local (pré-NAS unifié).
 ## Statut
 
 - Maintenu pour référence/migration uniquement.
+- Considéré read-only (pas de développement actif).
 - Non recommandé pour la prod actuelle.
 - Le mode recommandé est la stack NAS sous `../nas_memory/`.

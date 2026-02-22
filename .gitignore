@@ -10,6 +10,7 @@ vault_qdrant/
 queue/
 *.log
 *.log.*
+.memory_runtime/
 
 # Python
 __pycache__/

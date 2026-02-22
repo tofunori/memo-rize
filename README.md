@@ -19,15 +19,22 @@ Ce repo a été réorganisé pour séparer clairement:
   - `nas_memory/graph_view.py`
   - `nas_memory/relation_linker.py`
 
-### 2) Moteur core (encore requis)
+### 2) Moteur core canonique
 
-Ces scripts racine sont **toujours utilisés** par `nas_memory` via subprocess:
+Le moteur core est maintenant dans `nas_memory/core/`:
+
+- `nas_memory/core/vault_retrieve.py`
+- `nas_memory/core/process_queue.py`
+- `nas_memory/core/vault_embed.py`
+- `nas_memory/core/runtime_config.py` (env-first + override fichier optionnel)
+
+Pour compatibilite, les scripts root existent encore comme **shims**:
 
 - `vault_retrieve.py`
 - `process_queue.py`
 - `vault_embed.py`
 
-Ils restent donc au root pour la compatibilité runtime actuelle (V1.3R).
+Ils deleguent vers `nas_memory/core/*` et conservent la CLI historique.
 
 ## Ce qui est archivé (legacy local)
 
@@ -46,9 +53,8 @@ Ce dossier n'est plus le chemin recommandé pour la prod NAS.
 ## Structure du repo
 
 - `nas_memory/` → stack multi-agent active (prod)
-- `vault_retrieve.py` → retrieval core appelé par API NAS
-- `process_queue.py` → consolidation core appelée par worker NAS
-- `vault_embed.py` → indexing core appelé par worker/API NAS
+- `nas_memory/core/` → moteur core canonique (retrieval/consolidation/index)
+- `vault_retrieve.py`, `process_queue.py`, `vault_embed.py` → shims de compatibilite
 - `tests/` → tests core historiques
 - `legacy_local/` → ancien mode local Claude-only
 
@@ -70,9 +76,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r nas_memory/requirements.txt
 
-# config override (optionnel mais recommandé)
-# - root config.py non versionné
-# - ou MEMORY_CORE_CONFIG=<path>
+# config override (optionnel)
+# - MEMORY_CORE_CONFIG=/path/to/config.py
+# - ou variables d'environnement directes (env-first)
 
 systemctl --user enable --now memory-api.service memory-worker.service
 systemctl --user enable --now memory-profile-compact.timer memory-relation-compact.timer
@@ -84,4 +90,3 @@ systemctl --user enable --now memory-profile-compact.timer memory-relation-compa
 - Clients: thin-call only (`/retrieve`, `/events`)
 - Écriture mémoire: single-writer (`memory-worker`)
 - Relation compaction: shadow/write via flags d'env
-

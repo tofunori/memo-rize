@@ -4,7 +4,7 @@ API + worker NAS-hosted for shared memory across Claude Code, Codex, and OpenCla
 
 ## V1 scope
 
-- No deep refactor of `vault_retrieve.py`, `process_queue.py`, `vault_embed.py`.
+- Core scripts are canonical in `nas_memory/core/` with root shims for backward compatibility.
 - `memory-api` and `worker` run on NAS host (native Python).
 - Qdrant runs in embedded/local mode (`QdrantClient(path=...)`) via existing scripts.
 - Clients are thin: they only call `/retrieve` and `/events`.
@@ -66,8 +66,16 @@ source .venv/bin/activate
 pip install -r nas_memory/requirements.txt
 ```
 
-`nas_memory/config.py` is now versioned and provides safe defaults.
-For production NAS paths, keep a repo-root `config.py` override (not versioned) or set `MEMORY_CORE_CONFIG` to a custom path.
+`nas_memory/config.py` is versioned and provides safe defaults.
+Core runtime config is env-first; `MEMORY_CORE_CONFIG` can point to an optional file override.
+
+Canonical core scripts:
+
+- `nas_memory/core/vault_retrieve.py`
+- `nas_memory/core/process_queue.py`
+- `nas_memory/core/vault_embed.py`
+
+Backward-compatible shims remain at repo root (`vault_retrieve.py`, `process_queue.py`, `vault_embed.py`).
 
 ## Run API
 
